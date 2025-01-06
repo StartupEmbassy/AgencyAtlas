@@ -7,6 +7,7 @@ import { createRealEstate, getAdmins, updateUserStatus, getUserByTelegramId, upl
 import { analyzeImage } from "./services/xai";
 import { deleteMessages, deleteMessageAfterTimeout } from "./services/messageManager";
 import { MyContext, SessionData, initialSession } from "./types/session";
+import { RealEstateRegistration } from "./types/types";
 import crypto from 'crypto';
 
 // Cargar variables de entorno con ruta absoluta
@@ -112,9 +113,35 @@ bot.command("reject", async (ctx) => {
     }
 });
 
+// Función helper para loggear el estado
+function logState(ctx: MyContext, action: string) {
+    console.log('\n=== Estado de Sesión ===');
+    console.log('Acción:', action);
+    console.log('Step:', ctx.session.registration.step);
+    console.log('Registration:', JSON.stringify(ctx.session.registration.currentRegistration, null, 2));
+    console.log('=====================\n');
+}
+
 // Manejador de fotos
 bot.on("message:photo", async (ctx) => {
     try {
+        logState(ctx, "📸 Recibida foto");
+
+        // Verificar si ya hay un registro en proceso
+        if (ctx.session.registration.step !== 'idle') {
+            // Borrar la foto que acaba de enviar el usuario
+            if (ctx.message?.message_id && ctx.chat) {
+                await ctx.api.deleteMessage(ctx.chat.id, ctx.message.message_id);
+            }
+
+            const message = await ctx.reply("⚠️ Ya hay un registro en proceso. Por favor, completa el paso actual o cancela el registro antes de enviar una nueva foto.");
+            // Borrar el mensaje después de 5 segundos
+            if (ctx.chat) {
+                await deleteMessageAfterTimeout(ctx, ctx.chat.id, message.message_id, 5000);
+            }
+            return;
+        }
+
         const photos = ctx.message.photo;
         const photo = photos[photos.length - 1]; // Obtener la foto de mayor calidad
 
@@ -123,16 +150,17 @@ bot.on("message:photo", async (ctx) => {
         const photoUrl = `https://api.telegram.org/file/bot${process.env.BOT_TOKEN}/${file.file_path}`;
 
         // Guardar el file_id en la sesión
-        ctx.session.currentRegistration = {
+        ctx.session.registration.currentRegistration = createNewRegistration({
             photo: photo.file_id
-        };
+        });
+        logState(ctx, "💾 Guardada foto en sesión");
 
         // Analizar la imagen con Grok
         const analysis = await analyzeImage(photoUrl);
 
         // Si hay un error específico, manejarlo apropiadamente
         if (!analysis.success && analysis.error) {
-            ctx.session.step = 'waiting_name';
+            ctx.session.registration.step = 'waiting_name';
             const keyboard = new InlineKeyboard()
                 .text("❌ Cancelar", "cancel");
 
@@ -166,7 +194,7 @@ bot.on("message:photo", async (ctx) => {
 
         if (analysis.success && analysis.name) {
             // Si se encontró un nombre, mostrarlo y pedir confirmación
-            ctx.session.step = 'waiting_name';
+            ctx.session.registration.step = 'waiting_name';
             const confirmKeyboard = new InlineKeyboard()
                 .text("✅ Sí, es correcto", "confirm_name")
                 .text("❌ No, es otro", "reject_name")
@@ -178,7 +206,7 @@ bot.on("message:photo", async (ctx) => {
             });
         } else {
             // Si no se encontró nombre, pedir al usuario que lo ingrese
-            ctx.session.step = 'waiting_name';
+            ctx.session.registration.step = 'waiting_name';
             await ctx.reply("No pude detectar el nombre de la inmobiliaria en la imagen.\n\nPor favor, envía el nombre manualmente.", {
                 reply_markup: keyboard
             });
@@ -196,17 +224,19 @@ bot.on("message:photo", async (ctx) => {
 // Añadir manejadores para los nuevos botones
 bot.callbackQuery("confirm_name", async (ctx) => {
     try {
+        logState(ctx, "✅ Confirmando nombre");
         await ctx.answerCallbackQuery();
-        if (!ctx.session.currentRegistration) {
-            ctx.session.currentRegistration = {};
+        if (!ctx.session.registration.currentRegistration) {
+            ctx.session.registration.currentRegistration = createNewRegistration();
         }
         
         // Obtener el nombre del mensaje anterior
         const previousMessage = ctx.update.callback_query.message?.text;
         const nameMatch = previousMessage?.match(/\"([^\"]+)\"/);
         if (nameMatch && nameMatch[1]) {
-            ctx.session.currentRegistration.name = nameMatch[1];
-            ctx.session.step = 'waiting_qr';
+            ctx.session.registration.currentRegistration.name = nameMatch[1];
+            ctx.session.registration.step = 'waiting_qr';
+            logState(ctx, "👉 Nombre confirmado, esperando QR");
             
             // Crear teclado inline para preguntar sobre QR
             const keyboard = new InlineKeyboard()
@@ -228,7 +258,7 @@ bot.callbackQuery("confirm_name", async (ctx) => {
 bot.callbackQuery("reject_name", async (ctx) => {
     try {
         await ctx.answerCallbackQuery();
-        ctx.session.step = 'waiting_name';
+        ctx.session.registration.step = 'waiting_name';
         
         const keyboard = new InlineKeyboard()
             .text("❌ Cancelar", "cancel");
@@ -245,13 +275,15 @@ bot.callbackQuery("reject_name", async (ctx) => {
 // Manejador de texto (para nombre y QR)
 bot.on("message:text", async (ctx) => {
     try {
-        switch (ctx.session.step) {
+        logState(ctx, "📝 Recibido texto");
+        switch (ctx.session.registration.step) {
             case 'waiting_name':
-                if (!ctx.session.currentRegistration) {
-                    ctx.session.currentRegistration = {};
+                if (!ctx.session.registration.currentRegistration) {
+                    ctx.session.registration.currentRegistration = createNewRegistration();
                 }
-                ctx.session.currentRegistration.name = ctx.message.text;
-                ctx.session.step = 'waiting_qr';
+                ctx.session.registration.currentRegistration.name = ctx.message.text;
+                ctx.session.registration.step = 'waiting_qr';
+                logState(ctx, "👉 Nombre guardado, esperando QR");
                 
                 // Crear teclado inline para preguntar sobre QR
                 const keyboard = new InlineKeyboard()
@@ -264,11 +296,12 @@ bot.on("message:text", async (ctx) => {
                 break;
 
             case 'waiting_qr_input':
-                if (!ctx.session.currentRegistration) {
-                    ctx.session.currentRegistration = {};
+                if (!ctx.session.registration.currentRegistration) {
+                    ctx.session.registration.currentRegistration = createNewRegistration();
                 }
-                ctx.session.currentRegistration.qr = ctx.message.text;
-                ctx.session.step = 'waiting_location';
+                ctx.session.registration.currentRegistration.qr = ctx.message.text;
+                ctx.session.registration.step = 'waiting_location';
+                logState(ctx, "👉 QR guardado, esperando ubicación");
 
                 const cancelKeyboard = new InlineKeyboard()
                     .text("❌ Cancelar", "cancel");
@@ -290,8 +323,10 @@ bot.on("message:text", async (ctx) => {
 // Manejador de callbacks de botones inline
 bot.callbackQuery("has_qr", async (ctx) => {
     try {
+        logState(ctx, "🔍 Esperando input de QR");
         await ctx.answerCallbackQuery();
-        ctx.session.step = 'waiting_qr_input';
+        ctx.session.registration.step = 'waiting_qr_input';
+        logState(ctx, "👉 Cambiado a waiting_qr_input");
 
         const keyboard = new InlineKeyboard()
             .text("❌ Cancelar", "cancel");
@@ -307,12 +342,14 @@ bot.callbackQuery("has_qr", async (ctx) => {
 
 bot.callbackQuery("no_qr", async (ctx) => {
     try {
+        logState(ctx, "🚫 No tiene QR");
         await ctx.answerCallbackQuery();
-        if (!ctx.session.currentRegistration) {
-            ctx.session.currentRegistration = {};
+        if (!ctx.session.registration.currentRegistration) {
+            ctx.session.registration.currentRegistration = createNewRegistration();
         }
-        ctx.session.currentRegistration.qr = "No tiene QR";
-        ctx.session.step = 'waiting_location';
+        ctx.session.registration.currentRegistration.qr = "No tiene QR";
+        ctx.session.registration.step = 'waiting_location';
+        logState(ctx, "👉 QR marcado como no disponible, esperando ubicación");
 
         const keyboard = new InlineKeyboard()
             .text("❌ Cancelar", "cancel");
@@ -329,14 +366,14 @@ bot.callbackQuery("no_qr", async (ctx) => {
 // Manejador para el botón de cancelar
 bot.callbackQuery("cancel", async (ctx) => {
     try {
+        logState(ctx, "❌ Antes de cancelar");
         await ctx.answerCallbackQuery();
-        
-        // Borrar todos los mensajes anteriores
         await deleteMessages(ctx, [...ctx.session.botMessageIds, ...ctx.session.userMessageIds]);
         
-        ctx.session.step = 'idle';
-        ctx.session.currentRegistration = undefined;
+        ctx.session.registration.step = 'idle';
+        ctx.session.registration.currentRegistration = undefined;
         
+        logState(ctx, "✨ Después de cancelar");
         if (ctx.chat) {
             const message = await ctx.reply("Proceso cancelado. Puedes empezar de nuevo enviando una foto.");
             // Borrar el mensaje después de 5 segundos
@@ -355,9 +392,23 @@ bot.callbackQuery("cancel", async (ctx) => {
 // Manejador para el botón de confirmar
 bot.callbackQuery("confirm", async (ctx) => {
     try {
+        logState(ctx, "✅ Iniciando confirmación final");
+        
+        // Borrar todos los mensajes inmediatamente antes de procesar
+        if (ctx.chat && ctx.callbackQuery.message?.message_id) {
+            // Incluir el mensaje de confirmación en los mensajes a borrar
+            await deleteMessages(ctx, [
+                ...ctx.session.botMessageIds, 
+                ...ctx.session.userMessageIds,
+                ctx.callbackQuery.message.message_id
+            ]);
+        }
+
+        // Responder al callback después del borrado
         await ctx.answerCallbackQuery();
         
-        if (!ctx.from || !ctx.session.currentRegistration || !ctx.chat) {
+        if (!ctx.from || !ctx.session.registration.currentRegistration || !ctx.chat) {
+            console.log('❌ Error: Datos incompletos en confirmación');
             throw new Error('Datos incompletos');
         }
 
@@ -368,7 +419,7 @@ bot.callbackQuery("confirm", async (ctx) => {
         }
 
         // Procesar y subir la foto
-        const file = await ctx.api.getFile(ctx.session.currentRegistration.photo || '');
+        const file = await ctx.api.getFile(ctx.session.registration.currentRegistration.photo || '');
         const photoUrl = `https://api.telegram.org/file/bot${process.env.BOT_TOKEN}/${file.file_path}`;
         const response = await fetch(photoUrl);
         const photoBuffer = Buffer.from(await response.arrayBuffer());
@@ -386,11 +437,11 @@ bot.callbackQuery("confirm", async (ctx) => {
         // Guardar en la base de datos
         const realEstate = await createRealEstate({
             user_id: user.id,
-            name: ctx.session.currentRegistration.name || '',
+            name: ctx.session.registration.currentRegistration.name || '',
             photo_url: uploadedPhotoUrl,
-            qr_info: ctx.session.currentRegistration.qr || null,
-            latitude: ctx.session.currentRegistration.location?.latitude || 0,
-            longitude: ctx.session.currentRegistration.location?.longitude || 0,
+            qr_info: ctx.session.registration.currentRegistration.qr || null,
+            latitude: ctx.session.registration.currentRegistration.location?.latitude || 0,
+            longitude: ctx.session.registration.currentRegistration.location?.longitude || 0,
             is_active: true
         });
 
@@ -398,31 +449,76 @@ bot.callbackQuery("confirm", async (ctx) => {
             throw new Error('Error al guardar la inmobiliaria');
         }
 
-        // Borrar todos los mensajes anteriores
-        await deleteMessages(ctx, [...ctx.session.botMessageIds, ...ctx.session.userMessageIds]);
-
-        const summary = `¡Registro completado con éxito! 🎉\n\n` +
-            `Resumen:\n` +
-            `📸 Foto: Recibida\n` +
-            `🏢 Nombre: ${ctx.session.currentRegistration.name}\n` +
-            `🔍 QR: ${ctx.session.currentRegistration.qr}\n` +
-            `📍 Ubicación: Recibida`;
-
-        ctx.session.step = 'idle';
-        ctx.session.currentRegistration = undefined;
+        // Limpiar la sesión
+        ctx.session.registration.step = 'idle';
+        ctx.session.registration.currentRegistration = undefined;
+        logState(ctx, "✨ Registro completado y sesión limpiada");
         
-        const message = await ctx.reply(summary);
-        // Borrar el mensaje de éxito después de 10 segundos
-        await deleteMessageAfterTimeout(ctx, ctx.chat.id, message.message_id, 10000);
+        // Mostrar mensaje de éxito temporal
+        const successMessage = await ctx.reply("✅ ¡Inmobiliaria registrada con éxito!");
+        // Borrar el mensaje de éxito después de 3 segundos
+        if (ctx.chat) {
+            await deleteMessageAfterTimeout(ctx, ctx.chat.id, successMessage.message_id, 3000);
+        }
     } catch (error) {
         console.error("Error al procesar confirmación:", error);
         if (ctx.chat) {
-            const errorMessage = await ctx.reply("Lo siento, ha ocurrido un error al guardar los datos. Por favor, intenta nuevamente.");
+            const errorMessage = await ctx.reply("❌ Error al guardar los datos. Por favor, intenta nuevamente.");
             // Borrar el mensaje de error después de 5 segundos
             await deleteMessageAfterTimeout(ctx, ctx.chat.id, errorMessage.message_id, 5000);
         }
     }
 });
+
+// Manejador de ubicación
+bot.on("message:location", async (ctx) => {
+    try {
+        logState(ctx, "📍 Recibida ubicación");
+        if (ctx.session.registration.step !== 'waiting_location') {
+            await ctx.reply("Por favor, sigue el proceso paso a paso. Envía una foto para comenzar.");
+            return;
+        }
+
+        if (!ctx.session.registration.currentRegistration) {
+            ctx.session.registration.currentRegistration = createNewRegistration();
+        }
+
+        // Guardar la ubicación
+        ctx.session.registration.currentRegistration.location = {
+            latitude: ctx.message.location.latitude,
+            longitude: ctx.message.location.longitude
+        };
+
+        logState(ctx, "👉 Ubicación guardada, mostrando resumen");
+
+        // Mostrar resumen y pedir confirmación
+        const summary = `Por favor, verifica que los datos sean correctos:\n\n` +
+            `📸 Foto: Recibida\n` +
+            `🏢 Nombre: ${ctx.session.registration.currentRegistration.name}\n` +
+            `🔍 QR: ${ctx.session.registration.currentRegistration.qr}\n` +
+            `📍 Ubicación: Recibida\n\n` +
+            `¿Deseas guardar esta inmobiliaria?`;
+
+        const keyboard = new InlineKeyboard()
+            .text("✅ Confirmar", "confirm")
+            .text("❌ Cancelar", "cancel");
+
+        await ctx.reply(summary, { reply_markup: keyboard });
+    } catch (error) {
+        console.error("Error al procesar ubicación:", error);
+        await ctx.reply("Lo siento, ha ocurrido un error. Por favor, intenta nuevamente.");
+    }
+});
+
+// Función helper para crear una nueva registración
+function createNewRegistration(initial: Partial<RealEstateRegistration> = {}): RealEstateRegistration {
+    return {
+        ...initial,
+        started_at: Date.now(),
+        last_update: Date.now(),
+        messages_ids: []
+    };
+}
 
 // Iniciar el bot
 try {

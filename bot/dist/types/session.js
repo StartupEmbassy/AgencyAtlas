@@ -2,7 +2,10 @@
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.initialSession = void 0;
 exports.initialSession = {
-    step: 'idle',
+    registration: {
+        step: 'idle',
+        is_active: false
+    },
     botMessageIds: [],
     userMessageIds: []
 };

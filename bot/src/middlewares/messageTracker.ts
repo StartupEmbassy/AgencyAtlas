@@ -1,58 +1,33 @@
-import { NextFunction, Api, Context } from "grammy";
 import { MyContext } from "../types/session";
-import { trackUserMessage, trackBotMessage } from "../services/messageManager";
+import { Middleware } from "grammy";
 
-// Middleware para rastrear automáticamente los IDs de mensajes
-export async function messageTrackerMiddleware(ctx: MyContext, next: NextFunction) {
-    try {
-        // Rastrear mensaje del usuario si existe
-        if (ctx.message?.message_id) {
-            trackUserMessage(ctx, ctx.message.message_id);
+// Función helper para añadir IDs de mensajes al registro actual
+function addMessageToRegistration(ctx: MyContext, messageId: number) {
+    if (ctx.session.registration.currentRegistration) {
+        if (!ctx.session.registration.currentRegistration.messages_ids) {
+            ctx.session.registration.currentRegistration.messages_ids = [];
         }
-
-        // Interceptar el método reply
-        const originalReply = ctx.reply.bind(ctx);
-        ctx.reply = async function(...args) {
-            const sentMessage = await originalReply(...args);
-            if (sentMessage.message_id) {
-                trackBotMessage(ctx, sentMessage.message_id);
-            }
-            return sentMessage;
-        };
-
-        // Interceptar api.sendMessage
-        const originalSendMessage = ctx.api.sendMessage.bind(ctx.api);
-        ctx.api.sendMessage = async function(...args) {
-            const sentMessage = await originalSendMessage(...args);
-            if (sentMessage.message_id) {
-                trackBotMessage(ctx, sentMessage.message_id);
-            }
-            return sentMessage;
-        };
-
-        // Interceptar api.sendPhoto
-        const originalSendPhoto = ctx.api.sendPhoto.bind(ctx.api);
-        ctx.api.sendPhoto = async function(...args) {
-            const sentMessage = await originalSendPhoto(...args);
-            if (sentMessage.message_id) {
-                trackBotMessage(ctx, sentMessage.message_id);
-            }
-            return sentMessage;
-        };
-
-        // Interceptar api.sendLocation
-        const originalSendLocation = ctx.api.sendLocation.bind(ctx.api);
-        ctx.api.sendLocation = async function(...args) {
-            const sentMessage = await originalSendLocation(...args);
-            if (sentMessage.message_id) {
-                trackBotMessage(ctx, sentMessage.message_id);
-            }
-            return sentMessage;
-        };
-
-        await next();
-    } catch (error) {
-        console.error("Error en messageTrackerMiddleware:", error);
-        await next();
+        ctx.session.registration.currentRegistration.messages_ids.push(messageId);
     }
-} 
+}
+
+export const messageTrackerMiddleware: Middleware<MyContext> = async (ctx, next) => {
+    // Rastrear mensaje del usuario
+    if (ctx.message?.message_id) {
+        ctx.session.userMessageIds.push(ctx.message.message_id);
+        addMessageToRegistration(ctx, ctx.message.message_id);
+    }
+
+    // Interceptar el método reply
+    const originalReply = ctx.reply.bind(ctx);
+    ctx.reply = async function(...args) {
+        const sentMessage = await originalReply(...args);
+        if (sentMessage.message_id) {
+            ctx.session.botMessageIds.push(sentMessage.message_id);
+            addMessageToRegistration(ctx, sentMessage.message_id);
+        }
+        return sentMessage;
+    };
+
+    await next();
+}; 

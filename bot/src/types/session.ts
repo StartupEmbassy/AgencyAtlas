@@ -1,18 +1,13 @@
 import { Context } from "grammy";
+import { RegistrationState } from "./types";
 
 export interface SessionData {
-    step: 'idle' | 'waiting_photo' | 'waiting_name' | 'waiting_qr' | 'waiting_location' | 'waiting_qr_input' | 'waiting_confirmation';
-    currentRegistration?: {
-        photo?: string;
-        name?: string;
-        qr?: string;
-        location?: {
-            latitude: number;
-            longitude: number;
-        };
-    };
-    botMessageIds: number[];    // Para rastrear los mensajes del bot
-    userMessageIds: number[];   // Para rastrear los mensajes del usuario
+    // Estado del proceso de registro
+    registration: RegistrationState;
+    
+    // IDs de mensajes para tracking
+    botMessageIds: number[];    // Mensajes enviados por el bot
+    userMessageIds: number[];   // Mensajes enviados por el usuario
 }
 
 export interface MyContext extends Context {
@@ -20,7 +15,10 @@ export interface MyContext extends Context {
 }
 
 export const initialSession: SessionData = {
-    step: 'idle',
+    registration: {
+        step: 'idle',
+        is_active: false
+    },
     botMessageIds: [],
     userMessageIds: []
 }; 
