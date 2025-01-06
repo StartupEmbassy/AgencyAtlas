@@ -122,19 +122,50 @@ bot.on("message:photo", async (ctx) => {
         const file = await ctx.api.getFile(photo.file_id);
         const photoUrl = `https://api.telegram.org/file/bot${process.env.BOT_TOKEN}/${file.file_path}`;
 
-        // Analizar la imagen con Grok
-        const analysis = await analyzeImage(photoUrl);
-
         // Guardar el file_id en la sesión
         ctx.session.currentRegistration = {
             photo: photo.file_id
         };
 
+        // Analizar la imagen con Grok
+        const analysis = await analyzeImage(photoUrl);
+
+        // Si hay un error específico, manejarlo apropiadamente
+        if (!analysis.success && analysis.error) {
+            ctx.session.step = 'waiting_name';
+            const keyboard = new InlineKeyboard()
+                .text("❌ Cancelar", "cancel");
+
+            switch (analysis.error.code) {
+                case 'API_PERMISSION_ERROR':
+                    // Error de permisos - informar y continuar manualmente
+                    await ctx.reply("⚠️ El sistema de detección automática no está disponible en este momento.\n\nPor favor, envía el nombre de la inmobiliaria manualmente.", {
+                        reply_markup: keyboard
+                    });
+                    break;
+
+                case 'NO_API_KEY':
+                    // API key no configurada - informar y continuar manualmente
+                    await ctx.reply("⚠️ El sistema de detección automática no está configurado.\n\nPor favor, envía el nombre de la inmobiliaria manualmente.", {
+                        reply_markup: keyboard
+                    });
+                    break;
+
+                default:
+                    // Otros errores - informar y continuar manualmente
+                    console.error(`Error en análisis de imagen: ${analysis.error.code} - ${analysis.error.message}`);
+                    await ctx.reply("⚠️ No se pudo analizar la imagen automáticamente.\n\nPor favor, envía el nombre de la inmobiliaria manualmente.", {
+                        reply_markup: keyboard
+                    });
+            }
+            return;
+        }
+
         const keyboard = new InlineKeyboard()
             .text("❌ Cancelar", "cancel");
 
         if (analysis.success && analysis.name) {
-            // Si Grok encontró un nombre, mostrarlo y pedir confirmación
+            // Si se encontró un nombre, mostrarlo y pedir confirmación
             ctx.session.step = 'waiting_name';
             const confirmKeyboard = new InlineKeyboard()
                 .text("✅ Sí, es correcto", "confirm_name")
@@ -148,7 +179,7 @@ bot.on("message:photo", async (ctx) => {
         } else {
             // Si no se encontró nombre, pedir al usuario que lo ingrese
             ctx.session.step = 'waiting_name';
-            await ctx.reply("Por favor, envía el nombre de la inmobiliaria.", {
+            await ctx.reply("No pude detectar el nombre de la inmobiliaria en la imagen.\n\nPor favor, envía el nombre manualmente.", {
                 reply_markup: keyboard
             });
         }
