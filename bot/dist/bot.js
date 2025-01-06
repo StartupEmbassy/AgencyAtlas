@@ -9,7 +9,7 @@ const path_1 = __importDefault(require("path"));
 const auth_1 = require("./middlewares/auth");
 const messageTracker_1 = require("./middlewares/messageTracker");
 const supabase_1 = require("./services/supabase");
-const xai_1 = require("./services/xai");
+const gemini_1 = require("./services/gemini");
 const messageManager_1 = require("./services/messageManager");
 const session_1 = require("./types/session");
 const crypto_1 = __importDefault(require("crypto"));
@@ -152,23 +152,23 @@ bot.on("message:photo", async (ctx) => {
             photo: photo.file_id
         });
         logState(ctx, "💾 Guardada foto en sesión");
-        // Analizar la imagen con Grok
-        const analysis = await (0, xai_1.analyzeImage)(photoUrl);
+        // Analizar la imagen con Gemini
+        const analysis = await (0, gemini_1.analyzeImageWithGemini)(photoUrl);
         // Si hay un error específico, manejarlo apropiadamente
         if (!analysis.success && analysis.error) {
             ctx.session.registration.step = 'waiting_name';
             const keyboard = new grammy_1.InlineKeyboard()
                 .text("❌ Cancelar", "cancel");
             switch (analysis.error.code) {
-                case 'API_PERMISSION_ERROR':
-                    // Error de permisos - informar y continuar manualmente
+                case 'API_ERROR':
+                    // Error de API - informar y continuar manualmente
                     await ctx.reply("⚠️ El sistema de detección automática no está disponible en este momento.\n\nPor favor, envía el nombre de la inmobiliaria manualmente.", {
                         reply_markup: keyboard
                     });
                     break;
-                case 'NO_API_KEY':
-                    // API key no configurada - informar y continuar manualmente
-                    await ctx.reply("⚠️ El sistema de detección automática no está configurado.\n\nPor favor, envía el nombre de la inmobiliaria manualmente.", {
+                case 'PARSE_ERROR':
+                    // Error al parsear la respuesta - informar y continuar manualmente
+                    await ctx.reply("⚠️ No se pudo procesar la respuesta del sistema.\n\nPor favor, envía el nombre de la inmobiliaria manualmente.", {
                         reply_markup: keyboard
                     });
                     break;
