@@ -154,7 +154,12 @@ bot.on("message:photo", async (ctx) => {
         };
         ctx.session.step = 'waiting_name';
 
-        await ctx.reply("¡Excelente! Ahora, por favor envía el nombre de la inmobiliaria.");
+        const keyboard = new InlineKeyboard()
+            .text("❌ Cancelar", "cancel");
+
+        await ctx.reply("¡Excelente! Ahora, por favor envía el nombre de la inmobiliaria.", {
+            reply_markup: keyboard
+        });
     } catch (error) {
         console.error("Error al procesar la foto:", error);
         await ctx.reply("Lo siento, ha ocurrido un error al procesar la foto. Por favor, intenta nuevamente.");
@@ -175,7 +180,9 @@ bot.on("message:text", async (ctx) => {
                 // Crear teclado inline para preguntar sobre QR
                 const keyboard = new InlineKeyboard()
                     .text("Sí, tengo QR", "has_qr")
-                    .text("No tiene QR", "no_qr");
+                    .text("No tiene QR", "no_qr")
+                    .row()
+                    .text("❌ Cancelar", "cancel");
                 
                 await ctx.reply("¿La inmobiliaria tiene código QR?", { reply_markup: keyboard });
                 break;
@@ -186,7 +193,13 @@ bot.on("message:text", async (ctx) => {
                 }
                 ctx.session.currentRegistration.qr = ctx.message.text;
                 ctx.session.step = 'waiting_location';
-                await ctx.reply("Perfecto. Por último, envía la ubicación de la inmobiliaria.");
+
+                const cancelKeyboard = new InlineKeyboard()
+                    .text("❌ Cancelar", "cancel");
+
+                await ctx.reply("Perfecto. Por último, envía la ubicación de la inmobiliaria.", {
+                    reply_markup: cancelKeyboard
+                });
                 break;
 
             default:
@@ -203,7 +216,13 @@ bot.callbackQuery("has_qr", async (ctx) => {
     try {
         await ctx.answerCallbackQuery();
         ctx.session.step = 'waiting_qr_input';
-        await ctx.reply("Por favor, envía el código QR.");
+
+        const keyboard = new InlineKeyboard()
+            .text("❌ Cancelar", "cancel");
+
+        await ctx.reply("Por favor, envía el código QR.", {
+            reply_markup: keyboard
+        });
     } catch (error) {
         console.error("Error al procesar callback has_qr:", error);
         await ctx.reply("Lo siento, ha ocurrido un error. Por favor, intenta nuevamente.");
@@ -218,9 +237,28 @@ bot.callbackQuery("no_qr", async (ctx) => {
         }
         ctx.session.currentRegistration.qr = "No tiene QR";
         ctx.session.step = 'waiting_location';
-        await ctx.reply("Entendido. Por favor, envía la ubicación de la inmobiliaria.");
+
+        const keyboard = new InlineKeyboard()
+            .text("❌ Cancelar", "cancel");
+
+        await ctx.reply("Entendido. Por favor, envía la ubicación de la inmobiliaria.", {
+            reply_markup: keyboard
+        });
     } catch (error) {
         console.error("Error al procesar callback no_qr:", error);
+        await ctx.reply("Lo siento, ha ocurrido un error. Por favor, intenta nuevamente.");
+    }
+});
+
+// Manejador para el botón de cancelar
+bot.callbackQuery("cancel", async (ctx) => {
+    try {
+        await ctx.answerCallbackQuery();
+        ctx.session.step = 'idle';
+        ctx.session.currentRegistration = undefined;
+        await ctx.reply("Proceso cancelado. Puedes empezar de nuevo enviando una foto.");
+    } catch (error) {
+        console.error("Error al procesar cancelación:", error);
         await ctx.reply("Lo siento, ha ocurrido un error. Por favor, intenta nuevamente.");
     }
 });
