@@ -7,9 +7,11 @@ const grammy_1 = require("grammy");
 const dotenv_1 = __importDefault(require("dotenv"));
 const path_1 = __importDefault(require("path"));
 const auth_1 = require("./middlewares/auth");
+const messageTracker_1 = require("./middlewares/messageTracker");
 const supabase_1 = require("./services/supabase");
 const xai_1 = require("./services/xai");
 const messageManager_1 = require("./services/messageManager");
+const session_1 = require("./types/session");
 const crypto_1 = __importDefault(require("crypto"));
 // Cargar variables de entorno con ruta absoluta
 dotenv_1.default.config({ path: path_1.default.join(__dirname, '../../bot/.env') });
@@ -21,12 +23,10 @@ if (!process.env.BOT_TOKEN) {
 const bot = new grammy_1.Bot(process.env.BOT_TOKEN);
 // Configurar el middleware de sesión
 bot.use((0, grammy_1.session)({
-    initial: () => ({
-        step: 'idle',
-        botMessageIds: [],
-        userMessageIds: []
-    })
+    initial: () => session_1.initialSession
 }));
+// Aplicar middleware de tracking de mensajes
+bot.use(messageTracker_1.messageTrackerMiddleware);
 // Aplicar middleware de autenticación a todos los mensajes excepto /start
 bot.command("start", async (ctx) => {
     try {
@@ -111,10 +111,6 @@ bot.command("reject", async (ctx) => {
 // Manejador de fotos
 bot.on("message:photo", async (ctx) => {
     try {
-        // Rastrear el mensaje del usuario
-        if (ctx.message?.message_id) {
-            (0, messageManager_1.trackUserMessage)(ctx, ctx.message.message_id);
-        }
         const photos = ctx.message.photo;
         const photo = photos[photos.length - 1]; // Obtener la foto de mayor calidad
         // Obtener la URL de la foto
@@ -136,31 +132,22 @@ bot.on("message:photo", async (ctx) => {
                 .text("❌ No, es otro", "reject_name")
                 .row()
                 .text("❌ Cancelar", "cancel");
-            const sentMessage = await ctx.reply(`He detectado que el nombre de la inmobiliaria es "${analysis.name}" (confianza: ${Math.round((analysis.confidence || 0) * 100)}%).\n\n¿Es correcto?`, {
+            await ctx.reply(`He detectado que el nombre de la inmobiliaria es "${analysis.name}" (confianza: ${Math.round((analysis.confidence || 0) * 100)}%).\n\n¿Es correcto?`, {
                 reply_markup: confirmKeyboard
             });
-            // Rastrear el mensaje del bot
-            if (sentMessage.message_id) {
-                (0, messageManager_1.trackBotMessage)(ctx, sentMessage.message_id);
-            }
         }
         else {
             // Si no se encontró nombre, pedir al usuario que lo ingrese
             ctx.session.step = 'waiting_name';
-            const sentMessage = await ctx.reply("Por favor, envía el nombre de la inmobiliaria.", {
+            await ctx.reply("Por favor, envía el nombre de la inmobiliaria.", {
                 reply_markup: keyboard
             });
-            // Rastrear el mensaje del bot
-            if (sentMessage.message_id) {
-                (0, messageManager_1.trackBotMessage)(ctx, sentMessage.message_id);
-            }
         }
     }
     catch (error) {
         console.error("Error al procesar la foto:", error);
-        const errorMessage = await ctx.reply("Lo siento, ha ocurrido un error al procesar la foto. Por favor, intenta nuevamente.");
-        if (errorMessage.message_id) {
-            (0, messageManager_1.trackBotMessage)(ctx, errorMessage.message_id);
+        if (ctx.chat) {
+            const errorMessage = await ctx.reply("Lo siento, ha ocurrido un error al procesar la foto. Por favor, intenta nuevamente.");
             // Borrar el mensaje de error después de 5 segundos
             await (0, messageManager_1.deleteMessageAfterTimeout)(ctx, ctx.chat.id, errorMessage.message_id, 5000);
         }
@@ -295,21 +282,16 @@ bot.callbackQuery("cancel", async (ctx) => {
         ctx.session.currentRegistration = undefined;
         if (ctx.chat) {
             const message = await ctx.reply("Proceso cancelado. Puedes empezar de nuevo enviando una foto.");
-            if (message.message_id) {
-                (0, messageManager_1.trackBotMessage)(ctx, message.message_id);
-                // Borrar el mensaje después de 5 segundos
-                await (0, messageManager_1.deleteMessageAfterTimeout)(ctx, ctx.chat.id, message.message_id, 5000);
-            }
+            // Borrar el mensaje después de 5 segundos
+            await (0, messageManager_1.deleteMessageAfterTimeout)(ctx, ctx.chat.id, message.message_id, 5000);
         }
     }
     catch (error) {
         console.error("Error al procesar cancelación:", error);
         if (ctx.chat) {
             const errorMessage = await ctx.reply("Lo siento, ha ocurrido un error. Por favor, intenta nuevamente.");
-            if (errorMessage.message_id) {
-                (0, messageManager_1.trackBotMessage)(ctx, errorMessage.message_id);
-                await (0, messageManager_1.deleteMessageAfterTimeout)(ctx, ctx.chat.id, errorMessage.message_id, 5000);
-            }
+            // Borrar el mensaje de error después de 5 segundos
+            await (0, messageManager_1.deleteMessageAfterTimeout)(ctx, ctx.chat.id, errorMessage.message_id, 5000);
         }
     }
 });
@@ -361,20 +343,15 @@ bot.callbackQuery("confirm", async (ctx) => {
         ctx.session.step = 'idle';
         ctx.session.currentRegistration = undefined;
         const message = await ctx.reply(summary);
-        if (message.message_id) {
-            (0, messageManager_1.trackBotMessage)(ctx, message.message_id);
-            // Borrar el mensaje de éxito después de 10 segundos
-            await (0, messageManager_1.deleteMessageAfterTimeout)(ctx, ctx.chat.id, message.message_id, 10000);
-        }
+        // Borrar el mensaje de éxito después de 10 segundos
+        await (0, messageManager_1.deleteMessageAfterTimeout)(ctx, ctx.chat.id, message.message_id, 10000);
     }
     catch (error) {
         console.error("Error al procesar confirmación:", error);
         if (ctx.chat) {
             const errorMessage = await ctx.reply("Lo siento, ha ocurrido un error al guardar los datos. Por favor, intenta nuevamente.");
-            if (errorMessage.message_id) {
-                (0, messageManager_1.trackBotMessage)(ctx, errorMessage.message_id);
-                await (0, messageManager_1.deleteMessageAfterTimeout)(ctx, ctx.chat.id, errorMessage.message_id, 5000);
-            }
+            // Borrar el mensaje de error después de 5 segundos
+            await (0, messageManager_1.deleteMessageAfterTimeout)(ctx, ctx.chat.id, errorMessage.message_id, 5000);
         }
     }
 });

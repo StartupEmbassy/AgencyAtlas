@@ -2,34 +2,15 @@ import { Bot, Context, session, InlineKeyboard } from "grammy";
 import dotenv from "dotenv";
 import path from "path";
 import { authMiddleware } from "./middlewares/auth";
+import { messageTrackerMiddleware } from "./middlewares/messageTracker";
 import { createRealEstate, getAdmins, updateUserStatus, getUserByTelegramId, uploadPhoto } from "./services/supabase";
 import { analyzeImage } from "./services/xai";
-import { deleteMessages, deleteMessageAfterTimeout, trackBotMessage, trackUserMessage } from "./services/messageManager";
+import { deleteMessages, deleteMessageAfterTimeout } from "./services/messageManager";
+import { MyContext, SessionData, initialSession } from "./types/session";
 import crypto from 'crypto';
 
 // Cargar variables de entorno con ruta absoluta
 dotenv.config({ path: path.join(__dirname, '../../bot/.env') });
-
-// Tipos para el contexto de la sesión
-interface SessionData {
-    step: 'idle' | 'waiting_photo' | 'waiting_name' | 'waiting_qr' | 'waiting_location' | 'waiting_qr_input' | 'waiting_confirmation';
-    currentRegistration?: {
-        photo?: string;
-        name?: string;
-        qr?: string;
-        location?: {
-            latitude: number;
-            longitude: number;
-        };
-    };
-    botMessageIds: number[];    // Para rastrear los mensajes del bot
-    userMessageIds: number[];   // Para rastrear los mensajes del usuario
-}
-
-// Exportar MyContext para que otros módulos puedan usarlo
-export interface MyContext extends Context {
-    session: SessionData;
-}
 
 // Verificar que existe BOT_TOKEN
 if (!process.env.BOT_TOKEN) {
@@ -41,12 +22,11 @@ const bot = new Bot<MyContext>(process.env.BOT_TOKEN);
 
 // Configurar el middleware de sesión
 bot.use(session({
-    initial: (): SessionData => ({
-        step: 'idle',
-        botMessageIds: [],
-        userMessageIds: []
-    })
+    initial: (): SessionData => initialSession
 }));
+
+// Aplicar middleware de tracking de mensajes
+bot.use(messageTrackerMiddleware);
 
 // Aplicar middleware de autenticación a todos los mensajes excepto /start
 bot.command("start", async (ctx) => {
@@ -135,11 +115,6 @@ bot.command("reject", async (ctx) => {
 // Manejador de fotos
 bot.on("message:photo", async (ctx) => {
     try {
-        // Rastrear el mensaje del usuario
-        if (ctx.message?.message_id) {
-            trackUserMessage(ctx, ctx.message.message_id);
-        }
-
         const photos = ctx.message.photo;
         const photo = photos[photos.length - 1]; // Obtener la foto de mayor calidad
 
@@ -167,31 +142,20 @@ bot.on("message:photo", async (ctx) => {
                 .row()
                 .text("❌ Cancelar", "cancel");
 
-            const sentMessage = await ctx.reply(`He detectado que el nombre de la inmobiliaria es "${analysis.name}" (confianza: ${Math.round((analysis.confidence || 0) * 100)}%).\n\n¿Es correcto?`, {
+            await ctx.reply(`He detectado que el nombre de la inmobiliaria es "${analysis.name}" (confianza: ${Math.round((analysis.confidence || 0) * 100)}%).\n\n¿Es correcto?`, {
                 reply_markup: confirmKeyboard
             });
-            
-            // Rastrear el mensaje del bot
-            if (sentMessage.message_id) {
-                trackBotMessage(ctx, sentMessage.message_id);
-            }
         } else {
             // Si no se encontró nombre, pedir al usuario que lo ingrese
             ctx.session.step = 'waiting_name';
-            const sentMessage = await ctx.reply("Por favor, envía el nombre de la inmobiliaria.", {
+            await ctx.reply("Por favor, envía el nombre de la inmobiliaria.", {
                 reply_markup: keyboard
             });
-            
-            // Rastrear el mensaje del bot
-            if (sentMessage.message_id) {
-                trackBotMessage(ctx, sentMessage.message_id);
-            }
         }
     } catch (error) {
         console.error("Error al procesar la foto:", error);
-        const errorMessage = await ctx.reply("Lo siento, ha ocurrido un error al procesar la foto. Por favor, intenta nuevamente.");
-        if (errorMessage.message_id) {
-            trackBotMessage(ctx, errorMessage.message_id);
+        if (ctx.chat) {
+            const errorMessage = await ctx.reply("Lo siento, ha ocurrido un error al procesar la foto. Por favor, intenta nuevamente.");
             // Borrar el mensaje de error después de 5 segundos
             await deleteMessageAfterTimeout(ctx, ctx.chat.id, errorMessage.message_id, 5000);
         }
@@ -344,20 +308,15 @@ bot.callbackQuery("cancel", async (ctx) => {
         
         if (ctx.chat) {
             const message = await ctx.reply("Proceso cancelado. Puedes empezar de nuevo enviando una foto.");
-            if (message.message_id) {
-                trackBotMessage(ctx, message.message_id);
-                // Borrar el mensaje después de 5 segundos
-                await deleteMessageAfterTimeout(ctx, ctx.chat.id, message.message_id, 5000);
-            }
+            // Borrar el mensaje después de 5 segundos
+            await deleteMessageAfterTimeout(ctx, ctx.chat.id, message.message_id, 5000);
         }
     } catch (error) {
         console.error("Error al procesar cancelación:", error);
         if (ctx.chat) {
             const errorMessage = await ctx.reply("Lo siento, ha ocurrido un error. Por favor, intenta nuevamente.");
-            if (errorMessage.message_id) {
-                trackBotMessage(ctx, errorMessage.message_id);
-                await deleteMessageAfterTimeout(ctx, ctx.chat.id, errorMessage.message_id, 5000);
-            }
+            // Borrar el mensaje de error después de 5 segundos
+            await deleteMessageAfterTimeout(ctx, ctx.chat.id, errorMessage.message_id, 5000);
         }
     }
 });
@@ -422,19 +381,14 @@ bot.callbackQuery("confirm", async (ctx) => {
         ctx.session.currentRegistration = undefined;
         
         const message = await ctx.reply(summary);
-        if (message.message_id) {
-            trackBotMessage(ctx, message.message_id);
-            // Borrar el mensaje de éxito después de 10 segundos
-            await deleteMessageAfterTimeout(ctx, ctx.chat.id, message.message_id, 10000);
-        }
+        // Borrar el mensaje de éxito después de 10 segundos
+        await deleteMessageAfterTimeout(ctx, ctx.chat.id, message.message_id, 10000);
     } catch (error) {
         console.error("Error al procesar confirmación:", error);
         if (ctx.chat) {
             const errorMessage = await ctx.reply("Lo siento, ha ocurrido un error al guardar los datos. Por favor, intenta nuevamente.");
-            if (errorMessage.message_id) {
-                trackBotMessage(ctx, errorMessage.message_id);
-                await deleteMessageAfterTimeout(ctx, ctx.chat.id, errorMessage.message_id, 5000);
-            }
+            // Borrar el mensaje de error después de 5 segundos
+            await deleteMessageAfterTimeout(ctx, ctx.chat.id, errorMessage.message_id, 5000);
         }
     }
 });

@@ -1,5 +1,5 @@
 import { GrammyError } from "grammy";
-import { MyContext } from "../bot";
+import { MyContext } from "../types/session";
 
 export async function deleteMessages(ctx: MyContext, messageIds: number[]) {
     if (ctx.chat && messageIds) {
