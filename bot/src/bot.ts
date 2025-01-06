@@ -2,7 +2,8 @@ import { Bot, Context, session, InlineKeyboard } from "grammy";
 import dotenv from "dotenv";
 import path from "path";
 import { authMiddleware } from "./middlewares/auth";
-import { createRealEstate, getAdmins, updateUserStatus, getUserByTelegramId } from "./services/supabase";
+import { createRealEstate, getAdmins, updateUserStatus, getUserByTelegramId, uploadPhoto } from "./services/supabase";
+import crypto from 'crypto';
 
 // Cargar variables de entorno con ruta absoluta
 dotenv.config({ path: path.join(__dirname, '../../bot/.env') });
@@ -131,9 +132,25 @@ bot.on("message:photo", async (ctx) => {
         const photos = ctx.message.photo;
         const photo = photos[photos.length - 1]; // Obtener la foto de mayor calidad
 
-        // Guardar la foto en la sesión
+        // Descargar la foto
+        const file = await ctx.api.getFile(photo.file_id);
+        const photoUrl = `https://api.telegram.org/file/bot${process.env.BOT_TOKEN}/${file.file_path}`;
+        const response = await fetch(photoUrl);
+        const photoBuffer = Buffer.from(await response.arrayBuffer());
+        
+        // Generar nombre único para la foto
+        const fileName = `${crypto.randomUUID()}.jpg`;
+        
+        // Subir la foto a Supabase
+        const uploadedPhotoUrl = await uploadPhoto(photoBuffer, fileName);
+        
+        if (!uploadedPhotoUrl) {
+            throw new Error('Error al subir la foto');
+        }
+
+        // Guardar la URL en la sesión
         ctx.session.currentRegistration = {
-            photo: photo.file_id
+            photo: uploadedPhotoUrl
         };
         ctx.session.step = 'waiting_name';
 
@@ -235,7 +252,8 @@ bot.on("message:location", async (ctx) => {
                 photo_url: ctx.session.currentRegistration.photo || '',
                 qr_info: ctx.session.currentRegistration.qr || null,
                 latitude: location.latitude,
-                longitude: location.longitude
+                longitude: location.longitude,
+                is_active: true
             });
 
             if (!realEstate) {

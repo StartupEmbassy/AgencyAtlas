@@ -12,18 +12,33 @@ export async function authMiddleware(ctx: Context, next: NextFunction) {
         const username = ctx.from.username || 'unknown';
 
         // Intentar obtener el usuario
-        let user = await getUserByTelegramId(telegramId);
+        let user = await getUserByTelegramId(telegramId).catch(error => {
+            console.error('Error getting user:', error);
+            return null;
+        });
 
         // Si el usuario no existe, crearlo
         if (!user) {
-            user = await createUser(telegramId, username);
+            user = await createUser(telegramId, username).catch(error => {
+                // Si el error es de duplicado, intentar obtener el usuario nuevamente
+                if (error.code === '23505') {
+                    return getUserByTelegramId(telegramId);
+                }
+                console.error('Error creating user:', error);
+                return null;
+            });
+
             if (!user) {
-                await ctx.reply("Lo siento, ha ocurrido un error al registrarte.");
+                await ctx.reply("Lo siento, ha ocurrido un error al registrarte. Por favor, intenta más tarde.");
                 return;
             }
-            await ctx.reply("¡Bienvenido! Tu solicitud de registro ha sido enviada a los administradores para aprobación.");
-            // TODO: Notificar a los administradores
-            return;
+
+            // Solo enviar mensaje de bienvenida si es un usuario nuevo
+            if (user.status === 'pending') {
+                await ctx.reply("¡Bienvenido! Tu solicitud de registro ha sido enviada a los administradores para aprobación.");
+                // TODO: Notificar a los administradores
+                return;
+            }
         }
 
         // Verificar el estado del usuario
@@ -41,6 +56,6 @@ export async function authMiddleware(ctx: Context, next: NextFunction) {
         await next();
     } catch (error) {
         console.error("Error en authMiddleware:", error);
-        await ctx.reply("Lo siento, ha ocurrido un error. Por favor, intenta nuevamente.");
+        await ctx.reply("Lo siento, ha ocurrido un error. Por favor, intenta nuevamente más tarde.");
     }
 } 

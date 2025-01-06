@@ -8,6 +8,7 @@ const dotenv_1 = __importDefault(require("dotenv"));
 const path_1 = __importDefault(require("path"));
 const auth_1 = require("./middlewares/auth");
 const supabase_1 = require("./services/supabase");
+const crypto_1 = __importDefault(require("crypto"));
 // Cargar variables de entorno con ruta absoluta
 dotenv_1.default.config({ path: path_1.default.join(__dirname, '../../bot/.env') });
 // Verificar que existe BOT_TOKEN
@@ -108,9 +109,21 @@ bot.on("message:photo", async (ctx) => {
     try {
         const photos = ctx.message.photo;
         const photo = photos[photos.length - 1]; // Obtener la foto de mayor calidad
-        // Guardar la foto en la sesión
+        // Descargar la foto
+        const file = await ctx.api.getFile(photo.file_id);
+        const photoUrl = `https://api.telegram.org/file/bot${process.env.BOT_TOKEN}/${file.file_path}`;
+        const response = await fetch(photoUrl);
+        const photoBuffer = Buffer.from(await response.arrayBuffer());
+        // Generar nombre único para la foto
+        const fileName = `${crypto_1.default.randomUUID()}.jpg`;
+        // Subir la foto a Supabase
+        const uploadedPhotoUrl = await (0, supabase_1.uploadPhoto)(photoBuffer, fileName);
+        if (!uploadedPhotoUrl) {
+            throw new Error('Error al subir la foto');
+        }
+        // Guardar la URL en la sesión
         ctx.session.currentRegistration = {
-            photo: photo.file_id
+            photo: uploadedPhotoUrl
         };
         ctx.session.step = 'waiting_name';
         await ctx.reply("¡Excelente! Ahora, por favor envía el nombre de la inmobiliaria.");
@@ -204,7 +217,8 @@ bot.on("message:location", async (ctx) => {
                 photo_url: ctx.session.currentRegistration.photo || '',
                 qr_info: ctx.session.currentRegistration.qr || null,
                 latitude: location.latitude,
-                longitude: location.longitude
+                longitude: location.longitude,
+                is_active: true
             });
             if (!realEstate) {
                 throw new Error('Error al guardar la inmobiliaria');
