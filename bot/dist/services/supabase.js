@@ -13,6 +13,8 @@ exports.updateRealEstate = updateRealEstate;
 exports.deleteRealEstate = deleteRealEstate;
 exports.getAdmins = getAdmins;
 exports.uploadPhoto = uploadPhoto;
+exports.createListing = createListing;
+exports.createRealEstateContactInfo = createRealEstateContactInfo;
 const index_1 = require("@supabase/supabase-js/dist/main/index");
 const dotenv_1 = __importDefault(require("dotenv"));
 const path_1 = __importDefault(require("path"));
@@ -90,21 +92,17 @@ async function updateUserStatus(telegramId, status) {
 // Funciones de inmobiliarias
 async function createRealEstate(data) {
     try {
-        const { data: newRealEstate, error } = await exports.supabase
+        const { data: realEstate, error } = await exports.supabase
             .from('real_estates')
-            .insert([{
-                ...data,
-                created_by: data.user_id,
-                updated_by: data.user_id
-            }])
+            .insert([data])
             .select()
             .single();
         if (error)
             throw error;
-        return newRealEstate;
+        return realEstate;
     }
     catch (error) {
-        console.error('Error creating real estate:', error);
+        console.error('Error al crear inmobiliaria:', error);
         return null;
     }
 }
@@ -199,6 +197,40 @@ async function uploadPhoto(fileBuffer, fileName) {
     }
     catch (error) {
         console.error('Error uploading photo:', error);
+        return null;
+    }
+}
+// Función para crear un listing
+async function createListing(data) {
+    try {
+        const { data: listing, error } = await exports.supabase
+            .from('listings')
+            .insert([data])
+            .select()
+            .single();
+        if (error)
+            throw error;
+        return listing;
+    }
+    catch (error) {
+        console.error('Error al crear listing:', error);
+        return null;
+    }
+}
+// Función para crear información de contacto
+async function createRealEstateContactInfo(data) {
+    try {
+        const { data: contactInfo, error } = await exports.supabase
+            .from('real_estate_contact_info')
+            .insert([data])
+            .select()
+            .single();
+        if (error)
+            throw error;
+        return contactInfo;
+    }
+    catch (error) {
+        console.error('Error al crear información de contacto:', error);
         return null;
     }
 }

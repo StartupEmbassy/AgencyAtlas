@@ -1,24 +1,23 @@
 import { Context } from "grammy";
-import { RegistrationState } from "./types";
+import { RealEstateRegistration } from "./types";
 
 export interface SessionData {
-    // Estado del proceso de registro
-    registration: RegistrationState;
-    
-    // IDs de mensajes para tracking
-    botMessageIds: number[];    // Mensajes enviados por el bot
-    userMessageIds: number[];   // Mensajes enviados por el usuario
-}
-
-export interface MyContext extends Context {
-    session: SessionData;
+    registration: {
+        step: 'idle' | 'collecting_photos' | 'waiting_name' | 'waiting_qr' | 'waiting_qr_input' | 'waiting_location';
+        currentRegistration?: RealEstateRegistration;
+    };
+    botMessageIds: number[];
+    userMessageIds: number[];
 }
 
 export const initialSession: SessionData = {
     registration: {
-        step: 'idle',
-        is_active: false
+        step: 'idle'
     },
     botMessageIds: [],
     userMessageIds: []
+};
+
+export type MyContext = Context & {
+    session: SessionData;
 }; 

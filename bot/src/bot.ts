@@ -3,7 +3,7 @@ import dotenv from "dotenv";
 import path from "path";
 import { authMiddleware } from "./middlewares/auth";
 import { messageTrackerMiddleware } from "./middlewares/messageTracker";
-import { createRealEstate, getAdmins, updateUserStatus, getUserByTelegramId, uploadPhoto } from "./services/supabase";
+import { createRealEstate, getAdmins, updateUserStatus, getUserByTelegramId, uploadPhoto, createListing, createRealEstateContactInfo } from "./services/supabase";
 import { analyzeImageWithGemini } from "./services/gemini";
 import { deleteMessages, deleteMessageAfterTimeout } from "./services/messageManager";
 import { MyContext, SessionData, initialSession } from "./types/session";
@@ -137,15 +137,12 @@ bot.on("message:photo", async (ctx) => {
     try {
         logState(ctx, "📸 Recibida foto");
 
-        // Verificar si ya hay un registro en proceso
-        if (ctx.session.registration.step !== 'idle') {
-            // Borrar la foto que acaba de enviar el usuario
+        // Verificar si estamos en un estado válido para recibir fotos
+        if (ctx.session.registration.step !== 'idle' && ctx.session.registration.step !== 'collecting_photos') {
             if (ctx.message?.message_id && ctx.chat) {
                 await ctx.api.deleteMessage(ctx.chat.id, ctx.message.message_id);
             }
-
-            const message = await ctx.reply("⚠️ Ya hay un registro en proceso. Por favor, completa el paso actual o cancela el registro antes de enviar una nueva foto.");
-            // Borrar el mensaje después de 5 segundos
+            const message = await ctx.reply("⚠️ Por favor, completa el paso actual antes de enviar más fotos.");
             if (ctx.chat) {
                 await deleteMessageAfterTimeout(ctx, ctx.chat.id, message.message_id, 5000);
             }
@@ -155,79 +152,148 @@ bot.on("message:photo", async (ctx) => {
         const photos = ctx.message.photo;
         const photo = photos[photos.length - 1]; // Obtener la foto de mayor calidad
 
-        // Obtener la URL de la foto
-        const file = await ctx.api.getFile(photo.file_id);
-        const photoUrl = `https://api.telegram.org/file/bot${process.env.BOT_TOKEN}/${file.file_path}`;
-
-        // Guardar el file_id en la sesión
-        ctx.session.registration.currentRegistration = createNewRegistration({
-            photo: photo.file_id
-        });
-        logState(ctx, "💾 Guardada foto en sesión");
-
-        // Analizar la imagen con Gemini
-        const analysis = await analyzeImageWithGemini(photoUrl);
-
-        // Si hay un error específico, manejarlo apropiadamente
-        if (!analysis.success && analysis.error) {
-            ctx.session.registration.step = 'waiting_name';
-            const keyboard = new InlineKeyboard()
-                .text("❌ Cancelar", "cancel");
-
-            switch (analysis.error.code) {
-                case 'API_ERROR':
-                    // Error de API - informar y continuar manualmente
-                    await ctx.reply("⚠️ El sistema de detección automática no está disponible en este momento.\n\nPor favor, envía el nombre de la inmobiliaria manualmente.", {
-                        reply_markup: keyboard
-                    });
-                    break;
-
-                case 'PARSE_ERROR':
-                    // Error al parsear la respuesta - informar y continuar manualmente
-                    await ctx.reply("⚠️ No se pudo procesar la respuesta del sistema.\n\nPor favor, envía el nombre de la inmobiliaria manualmente.", {
-                        reply_markup: keyboard
-                    });
-                    break;
-
-                default:
-                    // Otros errores - informar y continuar manualmente
-                    console.error(`Error en análisis de imagen: ${analysis.error.code} - ${analysis.error.message}`);
-                    await ctx.reply("⚠️ No se pudo analizar la imagen automáticamente.\n\nPor favor, envía el nombre de la inmobiliaria manualmente.", {
-                        reply_markup: keyboard
-                    });
-            }
-            return;
+        // Si es la primera foto, inicializar el registro
+        if (ctx.session.registration.step === 'idle') {
+            ctx.session.registration.currentRegistration = createNewRegistration();
+            ctx.session.registration.step = 'collecting_photos';
         }
 
-        const keyboard = new InlineKeyboard()
-            .text("❌ Cancelar", "cancel");
+        // Añadir la foto al registro (sin análisis por ahora)
+        if (ctx.session.registration.currentRegistration) {
+            ctx.session.registration.currentRegistration.photos.push({
+                file_id: photo.file_id,
+                is_main: null
+            });
 
-        if (analysis.success && analysis.name) {
-            // Si se encontró un nombre, mostrarlo y pedir confirmación
-            ctx.session.registration.step = 'waiting_name';
-            const confirmKeyboard = new InlineKeyboard()
-                .text("✅ Sí, es correcto", "confirm_name")
-                .text("❌ No, es otro", "reject_name")
-                .row()
+            const keyboard = new InlineKeyboard()
+                .text("✅ Finalizar", "photos_done")
                 .text("❌ Cancelar", "cancel");
 
-            await ctx.reply(`He detectado que el nombre de la inmobiliaria es "${analysis.name}" (confianza: ${Math.round((analysis.confidence || 0) * 100)}%).\n\n¿Es correcto?`, {
-                reply_markup: confirmKeyboard
-            });
-        } else {
-            // Si no se encontró nombre, pedir al usuario que lo ingrese
-            ctx.session.registration.step = 'waiting_name';
-            await ctx.reply("No pude detectar el nombre de la inmobiliaria en la imagen.\n\nPor favor, envía el nombre manualmente.", {
+            await ctx.reply(`Foto ${ctx.session.registration.currentRegistration.photos.length} recibida. Puedes seguir enviando más fotos o finalizar.`, {
                 reply_markup: keyboard
             });
         }
+
     } catch (error) {
         console.error("Error al procesar la foto:", error);
         if (ctx.chat) {
             const errorMessage = await ctx.reply("Lo siento, ha ocurrido un error al procesar la foto. Por favor, intenta nuevamente.");
-            // Borrar el mensaje de error después de 5 segundos
             await deleteMessageAfterTimeout(ctx, ctx.chat.id, errorMessage.message_id, 5000);
         }
+    }
+});
+
+// Manejador para finalizar envío de fotos
+bot.callbackQuery("photos_done", async (ctx) => {
+    try {
+        await ctx.answerCallbackQuery();
+        
+        if (!ctx.session.registration.currentRegistration?.photos.length) {
+            await ctx.reply("Debes enviar al menos una foto.");
+            return;
+        }
+
+        // Analizar todas las fotos con Gemini
+        const analyzedPhotos = [];
+        for (const photo of ctx.session.registration.currentRegistration.photos) {
+            const file = await ctx.api.getFile(photo.file_id);
+            const photoUrl = `https://api.telegram.org/file/bot${process.env.BOT_TOKEN}/${file.file_path}`;
+            const analysis = await analyzeImageWithGemini(photoUrl);
+            analyzedPhotos.push({
+                ...photo,
+                analysis,
+                is_main: analysis.objects_detected?.some(obj => 
+                    obj.toLowerCase().includes('storefront') || 
+                    obj.toLowerCase().includes('facade') || 
+                    obj.toLowerCase().includes('building') ||
+                    obj.toLowerCase().includes('office')
+                ) ?? false
+            });
+        }
+
+        // Actualizar las fotos con sus análisis
+        ctx.session.registration.currentRegistration.photos = analyzedPhotos;
+
+        // Obtener el mejor nombre y otra información relevante
+        let bestName: string | undefined;
+        let bestConfidence = 0;
+        let allQrData: Set<string> = new Set();
+        let allWebUrls: Set<string> = new Set();
+        let allObjects: Set<string> = new Set();
+        let validationReasons: Set<string> = new Set();
+        let allPhoneNumbers: Set<string> = new Set();
+        let allEmails: Set<string> = new Set();
+        let businessHours: string | undefined;
+
+        for (const photo of analyzedPhotos) {
+            const analysis = photo.analysis;
+            if (analysis) {
+                // Nombre del negocio
+                if (analysis.confidence && analysis.name && analysis.confidence > bestConfidence) {
+                    bestName = analysis.name;
+                    bestConfidence = analysis.confidence;
+                }
+
+                // Recopilar toda la información
+                if (analysis.qr_data) allQrData.add(analysis.qr_data);
+                if (analysis.web_url) allWebUrls.add(analysis.web_url);
+                if (analysis.phone_numbers) {
+                    analysis.phone_numbers.forEach(phone => allPhoneNumbers.add(phone));
+                }
+                if (analysis.emails) {
+                    analysis.emails.forEach(email => allEmails.add(email));
+                }
+                if (analysis.business_hours && !businessHours) {
+                    businessHours = analysis.business_hours;
+                }
+                if (analysis.objects_detected) {
+                    analysis.objects_detected.forEach(obj => allObjects.add(obj));
+                }
+                if (analysis.validation_reasons) {
+                    analysis.validation_reasons.forEach(reason => validationReasons.add(reason));
+                }
+            }
+        }
+
+        // Verificar si tenemos una foto principal
+        const hasMainPhoto = analyzedPhotos.some(p => p.is_main);
+        if (!hasMainPhoto) {
+            await ctx.reply("No se detectó ninguna foto de la fachada del local. Por favor, asegúrate de incluir una foto del frente del local.");
+            return;
+        }
+
+        // Actualizar el registro con toda la información recopilada
+        if (ctx.session.registration.currentRegistration) {
+            ctx.session.registration.currentRegistration.name = bestName;
+            ctx.session.registration.currentRegistration.qr = Array.from(allQrData).join(', ');
+            ctx.session.registration.currentRegistration.web_url = Array.from(allWebUrls).join(', ');
+            // Guardar información de contacto para usar después
+            ctx.session.registration.currentRegistration.contact_info = {
+                phone_numbers: Array.from(allPhoneNumbers),
+                emails: Array.from(allEmails),
+                business_hours: businessHours
+            };
+        }
+
+        // Mostrar resumen de la información detectada
+        const summary = `He analizado las fotos y encontrado:\n\n` +
+            `🏢 Nombre: ${bestName || 'No detectado'}\n` +
+            `📱 QR: ${allQrData.size > 0 ? 'Detectado' : 'No detectado'}\n` +
+            `🌐 URLs: ${Array.from(allWebUrls).join(', ') || 'No detectadas'}\n` +
+            `☎️ Teléfonos: ${Array.from(allPhoneNumbers).join(', ') || 'No detectados'}\n` +
+            `📧 Emails: ${Array.from(allEmails).join(', ') || 'No detectados'}\n` +
+            `🕒 Horario: ${businessHours || 'No detectado'}\n\n` +
+            `¿Los datos son correctos?`;
+
+        const keyboard = new InlineKeyboard()
+            .text("✅ Sí, continuar", "confirm_info")
+            .text("❌ No, cancelar", "cancel");
+
+        await ctx.reply(summary, { reply_markup: keyboard });
+
+    } catch (error) {
+        console.error("Error al finalizar envío de fotos:", error);
+        await ctx.reply("Lo siento, ha ocurrido un error. Por favor, intenta nuevamente.");
     }
 });
 
@@ -415,7 +481,6 @@ bot.callbackQuery("confirm", async (ctx) => {
         
         // Borrar todos los mensajes inmediatamente antes de procesar
         if (ctx.chat && ctx.callbackQuery.message?.message_id) {
-            // Incluir el mensaje de confirmación en los mensajes a borrar
             await deleteMessages(ctx, [
                 ...ctx.session.botMessageIds, 
                 ...ctx.session.userMessageIds,
@@ -423,11 +488,9 @@ bot.callbackQuery("confirm", async (ctx) => {
             ]);
         }
 
-        // Responder al callback después del borrado
         await ctx.answerCallbackQuery();
         
         if (!ctx.from || !ctx.session.registration.currentRegistration || !ctx.chat) {
-            console.log('❌ Error: Datos incompletos en confirmación');
             throw new Error('Datos incompletos');
         }
 
@@ -437,35 +500,84 @@ bot.callbackQuery("confirm", async (ctx) => {
             throw new Error('Usuario no encontrado');
         }
 
-        // Procesar y subir la foto
-        const file = await ctx.api.getFile(ctx.session.registration.currentRegistration.photo || '');
-        const photoUrl = `https://api.telegram.org/file/bot${process.env.BOT_TOKEN}/${file.file_path}`;
-        const response = await fetch(photoUrl);
-        const photoBuffer = Buffer.from(await response.arrayBuffer());
-        
-        // Generar nombre único para la foto
-        const fileName = `${crypto.randomUUID()}.jpg`;
-        
-        // Subir la foto a Supabase
-        const uploadedPhotoUrl = await uploadPhoto(photoBuffer, fileName);
-        
-        if (!uploadedPhotoUrl) {
-            throw new Error('Error al subir la foto');
+        // Encontrar la foto principal
+        const mainPhoto = ctx.session.registration.currentRegistration.photos.find(p => p.is_main === true);
+        if (!mainPhoto) {
+            throw new Error('No se encontró la foto principal');
         }
 
-        // Guardar en la base de datos
+        // Procesar y subir la foto principal
+        const mainFile = await ctx.api.getFile(mainPhoto.file_id);
+        const mainPhotoUrl = `https://api.telegram.org/file/bot${process.env.BOT_TOKEN}/${mainFile.file_path}`;
+        const mainResponse = await fetch(mainPhotoUrl);
+        const mainPhotoBuffer = Buffer.from(await mainResponse.arrayBuffer());
+        
+        const mainFileName = `${crypto.randomUUID()}.jpg`;
+        const uploadedMainPhotoUrl = await uploadPhoto(mainPhotoBuffer, mainFileName);
+        
+        if (!uploadedMainPhotoUrl) {
+            throw new Error('Error al subir la foto principal');
+        }
+
+        // Guardar la inmobiliaria en la base de datos
         const realEstate = await createRealEstate({
             user_id: user.id,
             name: ctx.session.registration.currentRegistration.name || '',
-            photo_url: uploadedPhotoUrl,
-            qr_info: ctx.session.registration.currentRegistration.qr || null,
+            photo_url: uploadedMainPhotoUrl,
+            qr_info: ctx.session.registration.currentRegistration.qr || undefined,
             latitude: ctx.session.registration.currentRegistration.location?.latitude || 0,
             longitude: ctx.session.registration.currentRegistration.location?.longitude || 0,
-            is_active: true
+            is_active: true,
+            created_by: user.id,
+            updated_by: user.id,
+            validation_score: mainPhoto.analysis?.validation_score,
+            validation_reasons: mainPhoto.analysis?.validation_reasons,
+            condition_score: mainPhoto.analysis?.condition_score,
+            image_quality: mainPhoto.analysis?.image_quality,
+            objects_detected: mainPhoto.analysis?.objects_detected
         });
 
         if (!realEstate) {
             throw new Error('Error al guardar la inmobiliaria');
+        }
+
+        // Guardar la información de contacto
+        if (ctx.session.registration.currentRegistration.contact_info) {
+            await createRealEstateContactInfo({
+                real_estate_id: realEstate.id,
+                phone_numbers: ctx.session.registration.currentRegistration.contact_info.phone_numbers,
+                emails: ctx.session.registration.currentRegistration.contact_info.emails,
+                business_hours: ctx.session.registration.currentRegistration.contact_info.business_hours
+            });
+        }
+
+        // Procesar y guardar las fotos de listings
+        const listingPhotos = ctx.session.registration.currentRegistration.photos.filter(p => p.is_main === false);
+        for (const listingPhoto of listingPhotos) {
+            try {
+                const listingFile = await ctx.api.getFile(listingPhoto.file_id);
+                const listingPhotoUrl = `https://api.telegram.org/file/bot${process.env.BOT_TOKEN}/${listingFile.file_path}`;
+                const listingResponse = await fetch(listingPhotoUrl);
+                const listingPhotoBuffer = Buffer.from(await listingResponse.arrayBuffer());
+                
+                const listingFileName = `${crypto.randomUUID()}.jpg`;
+                const uploadedListingPhotoUrl = await uploadPhoto(listingPhotoBuffer, listingFileName);
+                
+                if (uploadedListingPhotoUrl) {
+                    await createListing({
+                        real_estate_id: realEstate.id,
+                        photo_url: uploadedListingPhotoUrl,
+                        qr_data: listingPhoto.analysis?.qr_data || undefined,
+                        web_url: listingPhoto.analysis?.web_url || undefined,
+                        created_by: user.id,
+                        updated_by: user.id,
+                        is_active: true
+                    });
+                }
+            } catch (error) {
+                console.error('Error al procesar foto de listing:', error);
+                // Continuar con la siguiente foto aunque haya error
+            }
         }
 
         // Limpiar la sesión
@@ -475,7 +587,6 @@ bot.callbackQuery("confirm", async (ctx) => {
         
         // Mostrar mensaje de éxito temporal
         const successMessage = await ctx.reply("✅ ¡Inmobiliaria registrada con éxito!");
-        // Borrar el mensaje de éxito después de 3 segundos
         if (ctx.chat) {
             await deleteMessageAfterTimeout(ctx, ctx.chat.id, successMessage.message_id, 3000);
         }
@@ -483,7 +594,6 @@ bot.callbackQuery("confirm", async (ctx) => {
         console.error("Error al procesar confirmación:", error);
         if (ctx.chat) {
             const errorMessage = await ctx.reply("❌ Error al guardar los datos. Por favor, intenta nuevamente.");
-            // Borrar el mensaje de error después de 5 segundos
             await deleteMessageAfterTimeout(ctx, ctx.chat.id, errorMessage.message_id, 5000);
         }
     }
@@ -531,13 +641,39 @@ bot.on("message:location", async (ctx) => {
     }
 });
 
+// Manejador para confirmar la información
+bot.callbackQuery("confirm_info", async (ctx) => {
+    try {
+        await ctx.answerCallbackQuery();
+        
+        if (!ctx.session.registration.currentRegistration) {
+            throw new Error('No hay registro activo');
+        }
+
+        // Cambiar al siguiente paso
+        ctx.session.registration.step = 'waiting_location';
+
+        const keyboard = new InlineKeyboard()
+            .text("❌ Cancelar", "cancel");
+
+        await ctx.reply("Perfecto. Por último, envía la ubicación de la inmobiliaria.", {
+            reply_markup: keyboard
+        });
+
+    } catch (error) {
+        console.error("Error al confirmar información:", error);
+        await ctx.reply("Lo siento, ha ocurrido un error. Por favor, intenta nuevamente.");
+    }
+});
+
 // Función helper para crear una nueva registración
 function createNewRegistration(initial: Partial<RealEstateRegistration> = {}): RealEstateRegistration {
     return {
-        ...initial,
         started_at: Date.now(),
         last_update: Date.now(),
-        messages_ids: []
+        messages_ids: [],
+        photos: [],
+        ...initial
     };
 }
 

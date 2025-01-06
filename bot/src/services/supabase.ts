@@ -2,6 +2,7 @@ import { createClient } from '@supabase/supabase-js/dist/main/index';
 import dotenv from 'dotenv';
 import path from 'path';
 import fetch from 'cross-fetch';
+import { RealEstate, Listing, RealEstateContactInfo } from '../types/types';
 
 // Cargar variables de entorno
 dotenv.config({ path: path.join(__dirname, '../../.env') });
@@ -34,21 +35,6 @@ export interface User {
     status: 'pending' | 'approved' | 'rejected';
     created_at: string;
     updated_at: string;
-}
-
-export interface RealEstate {
-    id: string;
-    user_id: string;
-    name: string;
-    photo_url: string;
-    qr_info: string | null;
-    latitude: number;
-    longitude: number;
-    created_at: string;
-    created_by: string;
-    updated_at: string;
-    updated_by: string;
-    is_active: boolean;
 }
 
 // Funciones de usuario
@@ -107,24 +93,18 @@ export async function updateUserStatus(telegramId: string, status: User['status'
 }
 
 // Funciones de inmobiliarias
-export async function createRealEstate(
-    data: Omit<RealEstate, 'id' | 'created_at' | 'updated_at' | 'created_by' | 'updated_by'>
-): Promise<RealEstate | null> {
+export async function createRealEstate(data: Omit<RealEstate, 'id' | 'created_at' | 'updated_at'>): Promise<RealEstate | null> {
     try {
-        const { data: newRealEstate, error } = await supabase
+        const { data: realEstate, error } = await supabase
             .from('real_estates')
-            .insert([{
-                ...data,
-                created_by: data.user_id,
-                updated_by: data.user_id
-            }])
+            .insert([data])
             .select()
             .single();
 
         if (error) throw error;
-        return newRealEstate;
+        return realEstate;
     } catch (error) {
-        console.error('Error creating real estate:', error);
+        console.error('Error al crear inmobiliaria:', error);
         return null;
     }
 }
@@ -225,6 +205,40 @@ export async function uploadPhoto(fileBuffer: Buffer, fileName: string): Promise
 
     } catch (error) {
         console.error('Error uploading photo:', error);
+        return null;
+    }
+}
+
+// Función para crear un listing
+export async function createListing(data: Omit<Listing, 'id' | 'created_at' | 'updated_at'>): Promise<Listing | null> {
+    try {
+        const { data: listing, error } = await supabase
+            .from('listings')
+            .insert([data])
+            .select()
+            .single();
+
+        if (error) throw error;
+        return listing;
+    } catch (error) {
+        console.error('Error al crear listing:', error);
+        return null;
+    }
+}
+
+// Función para crear información de contacto
+export async function createRealEstateContactInfo(data: Omit<RealEstateContactInfo, 'id'>): Promise<RealEstateContactInfo | null> {
+    try {
+        const { data: contactInfo, error } = await supabase
+            .from('real_estate_contact_info')
+            .insert([data])
+            .select()
+            .single();
+
+        if (error) throw error;
+        return contactInfo;
+    } catch (error) {
+        console.error('Error al crear información de contacto:', error);
         return null;
     }
 } 
