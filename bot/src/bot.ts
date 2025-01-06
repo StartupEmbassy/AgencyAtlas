@@ -122,6 +122,16 @@ function logState(ctx: MyContext, action: string) {
     console.log('=====================\n');
 }
 
+// Función helper para borrar mensajes del paso anterior
+async function deletePreviousMessages(ctx: MyContext) {
+    if (ctx.chat) {
+        await deleteMessages(ctx, [...ctx.session.botMessageIds, ...ctx.session.userMessageIds]);
+        // Limpiar los arrays después de borrar
+        ctx.session.botMessageIds = [];
+        ctx.session.userMessageIds = [];
+    }
+}
+
 // Manejador de fotos
 bot.on("message:photo", async (ctx) => {
     try {
@@ -226,6 +236,8 @@ bot.callbackQuery("confirm_name", async (ctx) => {
     try {
         logState(ctx, "✅ Confirmando nombre");
         await ctx.answerCallbackQuery();
+        await deletePreviousMessages(ctx);
+        
         if (!ctx.session.registration.currentRegistration) {
             ctx.session.registration.currentRegistration = createNewRegistration();
         }
@@ -278,6 +290,8 @@ bot.on("message:text", async (ctx) => {
         logState(ctx, "📝 Recibido texto");
         switch (ctx.session.registration.step) {
             case 'waiting_name':
+                await deletePreviousMessages(ctx);
+                
                 if (!ctx.session.registration.currentRegistration) {
                     ctx.session.registration.currentRegistration = createNewRegistration();
                 }
@@ -285,7 +299,6 @@ bot.on("message:text", async (ctx) => {
                 ctx.session.registration.step = 'waiting_qr';
                 logState(ctx, "👉 Nombre guardado, esperando QR");
                 
-                // Crear teclado inline para preguntar sobre QR
                 const keyboard = new InlineKeyboard()
                     .text("Sí, tengo QR", "has_qr")
                     .text("No tiene QR", "no_qr")
@@ -296,6 +309,8 @@ bot.on("message:text", async (ctx) => {
                 break;
 
             case 'waiting_qr_input':
+                await deletePreviousMessages(ctx);
+                
                 if (!ctx.session.registration.currentRegistration) {
                     ctx.session.registration.currentRegistration = createNewRegistration();
                 }
@@ -325,6 +340,8 @@ bot.callbackQuery("has_qr", async (ctx) => {
     try {
         logState(ctx, "🔍 Esperando input de QR");
         await ctx.answerCallbackQuery();
+        await deletePreviousMessages(ctx);
+        
         ctx.session.registration.step = 'waiting_qr_input';
         logState(ctx, "👉 Cambiado a waiting_qr_input");
 
@@ -344,6 +361,8 @@ bot.callbackQuery("no_qr", async (ctx) => {
     try {
         logState(ctx, "🚫 No tiene QR");
         await ctx.answerCallbackQuery();
+        await deletePreviousMessages(ctx);
+        
         if (!ctx.session.registration.currentRegistration) {
             ctx.session.registration.currentRegistration = createNewRegistration();
         }
@@ -478,6 +497,8 @@ bot.on("message:location", async (ctx) => {
             await ctx.reply("Por favor, sigue el proceso paso a paso. Envía una foto para comenzar.");
             return;
         }
+
+        await deletePreviousMessages(ctx);
 
         if (!ctx.session.registration.currentRegistration) {
             ctx.session.registration.currentRegistration = createNewRegistration();
