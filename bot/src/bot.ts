@@ -3,6 +3,8 @@ import dotenv from "dotenv";
 import path from "path";
 import { authMiddleware } from "./middlewares/auth";
 import { createRealEstate, getAdmins, updateUserStatus, getUserByTelegramId, uploadPhoto } from "./services/supabase";
+import { analyzeImage } from "./services/xai";
+import { deleteMessages, deleteMessageAfterTimeout, trackBotMessage, trackUserMessage } from "./services/messageManager";
 import crypto from 'crypto';
 
 // Cargar variables de entorno con ruta absoluta
@@ -20,10 +22,12 @@ interface SessionData {
             longitude: number;
         };
     };
+    botMessageIds: number[];    // Para rastrear los mensajes del bot
+    userMessageIds: number[];   // Para rastrear los mensajes del usuario
 }
 
-// Extender el contexto con los datos de la sesión
-interface MyContext extends Context {
+// Exportar MyContext para que otros módulos puedan usarlo
+export interface MyContext extends Context {
     session: SessionData;
 }
 
@@ -38,7 +42,9 @@ const bot = new Bot<MyContext>(process.env.BOT_TOKEN);
 // Configurar el middleware de sesión
 bot.use(session({
     initial: (): SessionData => ({
-        step: 'idle'
+        step: 'idle',
+        botMessageIds: [],
+        userMessageIds: []
     })
 }));
 
@@ -129,24 +135,115 @@ bot.command("reject", async (ctx) => {
 // Manejador de fotos
 bot.on("message:photo", async (ctx) => {
     try {
+        // Rastrear el mensaje del usuario
+        if (ctx.message?.message_id) {
+            trackUserMessage(ctx, ctx.message.message_id);
+        }
+
         const photos = ctx.message.photo;
         const photo = photos[photos.length - 1]; // Obtener la foto de mayor calidad
 
+        // Obtener la URL de la foto
+        const file = await ctx.api.getFile(photo.file_id);
+        const photoUrl = `https://api.telegram.org/file/bot${process.env.BOT_TOKEN}/${file.file_path}`;
+
+        // Analizar la imagen con Grok
+        const analysis = await analyzeImage(photoUrl);
+
         // Guardar el file_id en la sesión
         ctx.session.currentRegistration = {
-            photo: photo.file_id // Guardamos solo el ID, no subimos la foto aún
+            photo: photo.file_id
         };
-        ctx.session.step = 'waiting_name';
 
         const keyboard = new InlineKeyboard()
             .text("❌ Cancelar", "cancel");
 
-        await ctx.reply("¡Excelente! Ahora, por favor envía el nombre de la inmobiliaria.", {
+        if (analysis.success && analysis.name) {
+            // Si Grok encontró un nombre, mostrarlo y pedir confirmación
+            ctx.session.step = 'waiting_name';
+            const confirmKeyboard = new InlineKeyboard()
+                .text("✅ Sí, es correcto", "confirm_name")
+                .text("❌ No, es otro", "reject_name")
+                .row()
+                .text("❌ Cancelar", "cancel");
+
+            const sentMessage = await ctx.reply(`He detectado que el nombre de la inmobiliaria es "${analysis.name}" (confianza: ${Math.round((analysis.confidence || 0) * 100)}%).\n\n¿Es correcto?`, {
+                reply_markup: confirmKeyboard
+            });
+            
+            // Rastrear el mensaje del bot
+            if (sentMessage.message_id) {
+                trackBotMessage(ctx, sentMessage.message_id);
+            }
+        } else {
+            // Si no se encontró nombre, pedir al usuario que lo ingrese
+            ctx.session.step = 'waiting_name';
+            const sentMessage = await ctx.reply("Por favor, envía el nombre de la inmobiliaria.", {
+                reply_markup: keyboard
+            });
+            
+            // Rastrear el mensaje del bot
+            if (sentMessage.message_id) {
+                trackBotMessage(ctx, sentMessage.message_id);
+            }
+        }
+    } catch (error) {
+        console.error("Error al procesar la foto:", error);
+        const errorMessage = await ctx.reply("Lo siento, ha ocurrido un error al procesar la foto. Por favor, intenta nuevamente.");
+        if (errorMessage.message_id) {
+            trackBotMessage(ctx, errorMessage.message_id);
+            // Borrar el mensaje de error después de 5 segundos
+            await deleteMessageAfterTimeout(ctx, ctx.chat.id, errorMessage.message_id, 5000);
+        }
+    }
+});
+
+// Añadir manejadores para los nuevos botones
+bot.callbackQuery("confirm_name", async (ctx) => {
+    try {
+        await ctx.answerCallbackQuery();
+        if (!ctx.session.currentRegistration) {
+            ctx.session.currentRegistration = {};
+        }
+        
+        // Obtener el nombre del mensaje anterior
+        const previousMessage = ctx.update.callback_query.message?.text;
+        const nameMatch = previousMessage?.match(/\"([^\"]+)\"/);
+        if (nameMatch && nameMatch[1]) {
+            ctx.session.currentRegistration.name = nameMatch[1];
+            ctx.session.step = 'waiting_qr';
+            
+            // Crear teclado inline para preguntar sobre QR
+            const keyboard = new InlineKeyboard()
+                .text("Sí, tengo QR", "has_qr")
+                .text("No tiene QR", "no_qr")
+                .row()
+                .text("❌ Cancelar", "cancel");
+            
+            await ctx.reply("¿La inmobiliaria tiene código QR?", { reply_markup: keyboard });
+        } else {
+            throw new Error('No se pudo obtener el nombre');
+        }
+    } catch (error) {
+        console.error("Error al confirmar nombre:", error);
+        await ctx.reply("Lo siento, ha ocurrido un error. Por favor, intenta nuevamente.");
+    }
+});
+
+bot.callbackQuery("reject_name", async (ctx) => {
+    try {
+        await ctx.answerCallbackQuery();
+        ctx.session.step = 'waiting_name';
+        
+        const keyboard = new InlineKeyboard()
+            .text("❌ Cancelar", "cancel");
+        
+        await ctx.reply("Por favor, envía el nombre correcto de la inmobiliaria.", {
             reply_markup: keyboard
         });
     } catch (error) {
-        console.error("Error al procesar la foto:", error);
-        await ctx.reply("Lo siento, ha ocurrido un error al procesar la foto. Por favor, intenta nuevamente.");
+        console.error("Error al rechazar nombre:", error);
+        await ctx.reply("Lo siento, ha ocurrido un error. Por favor, intenta nuevamente.");
     }
 });
 
@@ -238,48 +335,30 @@ bot.callbackQuery("no_qr", async (ctx) => {
 bot.callbackQuery("cancel", async (ctx) => {
     try {
         await ctx.answerCallbackQuery();
+        
+        // Borrar todos los mensajes anteriores
+        await deleteMessages(ctx, [...ctx.session.botMessageIds, ...ctx.session.userMessageIds]);
+        
         ctx.session.step = 'idle';
         ctx.session.currentRegistration = undefined;
-        await ctx.reply("Proceso cancelado. Puedes empezar de nuevo enviando una foto.");
-    } catch (error) {
-        console.error("Error al procesar cancelación:", error);
-        await ctx.reply("Lo siento, ha ocurrido un error. Por favor, intenta nuevamente.");
-    }
-});
-
-// Manejador de ubicación
-bot.on("message:location", async (ctx) => {
-    try {
-        if (ctx.session.step === 'waiting_location' && ctx.from) {
-            if (!ctx.session.currentRegistration) {
-                ctx.session.currentRegistration = {};
+        
+        if (ctx.chat) {
+            const message = await ctx.reply("Proceso cancelado. Puedes empezar de nuevo enviando una foto.");
+            if (message.message_id) {
+                trackBotMessage(ctx, message.message_id);
+                // Borrar el mensaje después de 5 segundos
+                await deleteMessageAfterTimeout(ctx, ctx.chat.id, message.message_id, 5000);
             }
-            
-            const location = {
-                latitude: ctx.message.location.latitude,
-                longitude: ctx.message.location.longitude
-            };
-            ctx.session.currentRegistration.location = location;
-
-            // Mostrar resumen y botones de confirmación
-            const summary = `Por favor, confirma que los datos son correctos:\n\n` +
-                `🏢 Nombre: ${ctx.session.currentRegistration.name}\n` +
-                `🔍 QR: ${ctx.session.currentRegistration.qr}\n` +
-                `📍 Ubicación: Recibida\n\n` +
-                `¿Deseas guardar esta inmobiliaria?`;
-
-            const keyboard = new InlineKeyboard()
-                .text("✅ Confirmar", "confirm")
-                .text("❌ Cancelar", "cancel");
-
-            ctx.session.step = 'waiting_confirmation';
-            await ctx.reply(summary, { reply_markup: keyboard });
-        } else {
-            await ctx.reply("Por favor, sigue el proceso paso a paso. Envía una foto para comenzar.");
         }
     } catch (error) {
-        console.error("Error al procesar la ubicación:", error);
-        await ctx.reply("Lo siento, ha ocurrido un error. Por favor, intenta nuevamente.");
+        console.error("Error al procesar cancelación:", error);
+        if (ctx.chat) {
+            const errorMessage = await ctx.reply("Lo siento, ha ocurrido un error. Por favor, intenta nuevamente.");
+            if (errorMessage.message_id) {
+                trackBotMessage(ctx, errorMessage.message_id);
+                await deleteMessageAfterTimeout(ctx, ctx.chat.id, errorMessage.message_id, 5000);
+            }
+        }
     }
 });
 
@@ -288,7 +367,7 @@ bot.callbackQuery("confirm", async (ctx) => {
     try {
         await ctx.answerCallbackQuery();
         
-        if (!ctx.from || !ctx.session.currentRegistration) {
+        if (!ctx.from || !ctx.session.currentRegistration || !ctx.chat) {
             throw new Error('Datos incompletos');
         }
 
@@ -329,6 +408,9 @@ bot.callbackQuery("confirm", async (ctx) => {
             throw new Error('Error al guardar la inmobiliaria');
         }
 
+        // Borrar todos los mensajes anteriores
+        await deleteMessages(ctx, [...ctx.session.botMessageIds, ...ctx.session.userMessageIds]);
+
         const summary = `¡Registro completado con éxito! 🎉\n\n` +
             `Resumen:\n` +
             `📸 Foto: Recibida\n` +
@@ -338,10 +420,22 @@ bot.callbackQuery("confirm", async (ctx) => {
 
         ctx.session.step = 'idle';
         ctx.session.currentRegistration = undefined;
-        await ctx.reply(summary);
+        
+        const message = await ctx.reply(summary);
+        if (message.message_id) {
+            trackBotMessage(ctx, message.message_id);
+            // Borrar el mensaje de éxito después de 10 segundos
+            await deleteMessageAfterTimeout(ctx, ctx.chat.id, message.message_id, 10000);
+        }
     } catch (error) {
         console.error("Error al procesar confirmación:", error);
-        await ctx.reply("Lo siento, ha ocurrido un error al guardar los datos. Por favor, intenta nuevamente.");
+        if (ctx.chat) {
+            const errorMessage = await ctx.reply("Lo siento, ha ocurrido un error al guardar los datos. Por favor, intenta nuevamente.");
+            if (errorMessage.message_id) {
+                trackBotMessage(ctx, errorMessage.message_id);
+                await deleteMessageAfterTimeout(ctx, ctx.chat.id, errorMessage.message_id, 5000);
+            }
+        }
     }
 });
 
