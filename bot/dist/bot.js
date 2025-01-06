@@ -109,21 +109,9 @@ bot.on("message:photo", async (ctx) => {
     try {
         const photos = ctx.message.photo;
         const photo = photos[photos.length - 1]; // Obtener la foto de mayor calidad
-        // Descargar la foto
-        const file = await ctx.api.getFile(photo.file_id);
-        const photoUrl = `https://api.telegram.org/file/bot${process.env.BOT_TOKEN}/${file.file_path}`;
-        const response = await fetch(photoUrl);
-        const photoBuffer = Buffer.from(await response.arrayBuffer());
-        // Generar nombre único para la foto
-        const fileName = `${crypto_1.default.randomUUID()}.jpg`;
-        // Subir la foto a Supabase
-        const uploadedPhotoUrl = await (0, supabase_1.uploadPhoto)(photoBuffer, fileName);
-        if (!uploadedPhotoUrl) {
-            throw new Error('Error al subir la foto');
-        }
-        // Guardar la URL en la sesión
+        // Guardar el file_id en la sesión
         ctx.session.currentRegistration = {
-            photo: uploadedPhotoUrl
+            photo: photo.file_id // Guardamos solo el ID, no subimos la foto aún
         };
         ctx.session.step = 'waiting_name';
         const keyboard = new grammy_1.InlineKeyboard()
@@ -236,32 +224,17 @@ bot.on("message:location", async (ctx) => {
                 longitude: ctx.message.location.longitude
             };
             ctx.session.currentRegistration.location = location;
-            // Obtener el usuario actual
-            const user = await (0, supabase_1.getUserByTelegramId)(ctx.from.id.toString());
-            if (!user) {
-                throw new Error('Usuario no encontrado');
-            }
-            // Guardar en la base de datos
-            const realEstate = await (0, supabase_1.createRealEstate)({
-                user_id: user.id,
-                name: ctx.session.currentRegistration.name || '',
-                photo_url: ctx.session.currentRegistration.photo || '',
-                qr_info: ctx.session.currentRegistration.qr || null,
-                latitude: location.latitude,
-                longitude: location.longitude,
-                is_active: true
-            });
-            if (!realEstate) {
-                throw new Error('Error al guardar la inmobiliaria');
-            }
-            const summary = `Resumen del registro:\n` +
-                `📸 Foto: Recibida\n` +
+            // Mostrar resumen y botones de confirmación
+            const summary = `Por favor, confirma que los datos son correctos:\n\n` +
                 `🏢 Nombre: ${ctx.session.currentRegistration.name}\n` +
                 `🔍 QR: ${ctx.session.currentRegistration.qr}\n` +
-                `📍 Ubicación: Recibida`;
-            ctx.session.step = 'idle';
-            await ctx.reply(summary);
-            await ctx.reply("¡Registro completado con éxito! 🎉");
+                `📍 Ubicación: Recibida\n\n` +
+                `¿Deseas guardar esta inmobiliaria?`;
+            const keyboard = new grammy_1.InlineKeyboard()
+                .text("✅ Confirmar", "confirm")
+                .text("❌ Cancelar", "cancel");
+            ctx.session.step = 'waiting_confirmation';
+            await ctx.reply(summary, { reply_markup: keyboard });
         }
         else {
             await ctx.reply("Por favor, sigue el proceso paso a paso. Envía una foto para comenzar.");
@@ -270,6 +243,58 @@ bot.on("message:location", async (ctx) => {
     catch (error) {
         console.error("Error al procesar la ubicación:", error);
         await ctx.reply("Lo siento, ha ocurrido un error. Por favor, intenta nuevamente.");
+    }
+});
+// Manejador para el botón de confirmar
+bot.callbackQuery("confirm", async (ctx) => {
+    try {
+        await ctx.answerCallbackQuery();
+        if (!ctx.from || !ctx.session.currentRegistration) {
+            throw new Error('Datos incompletos');
+        }
+        // Obtener el usuario actual
+        const user = await (0, supabase_1.getUserByTelegramId)(ctx.from.id.toString());
+        if (!user) {
+            throw new Error('Usuario no encontrado');
+        }
+        // Procesar y subir la foto
+        const file = await ctx.api.getFile(ctx.session.currentRegistration.photo || '');
+        const photoUrl = `https://api.telegram.org/file/bot${process.env.BOT_TOKEN}/${file.file_path}`;
+        const response = await fetch(photoUrl);
+        const photoBuffer = Buffer.from(await response.arrayBuffer());
+        // Generar nombre único para la foto
+        const fileName = `${crypto_1.default.randomUUID()}.jpg`;
+        // Subir la foto a Supabase
+        const uploadedPhotoUrl = await (0, supabase_1.uploadPhoto)(photoBuffer, fileName);
+        if (!uploadedPhotoUrl) {
+            throw new Error('Error al subir la foto');
+        }
+        // Guardar en la base de datos
+        const realEstate = await (0, supabase_1.createRealEstate)({
+            user_id: user.id,
+            name: ctx.session.currentRegistration.name || '',
+            photo_url: uploadedPhotoUrl,
+            qr_info: ctx.session.currentRegistration.qr || null,
+            latitude: ctx.session.currentRegistration.location?.latitude || 0,
+            longitude: ctx.session.currentRegistration.location?.longitude || 0,
+            is_active: true
+        });
+        if (!realEstate) {
+            throw new Error('Error al guardar la inmobiliaria');
+        }
+        const summary = `¡Registro completado con éxito! 🎉\n\n` +
+            `Resumen:\n` +
+            `📸 Foto: Recibida\n` +
+            `🏢 Nombre: ${ctx.session.currentRegistration.name}\n` +
+            `🔍 QR: ${ctx.session.currentRegistration.qr}\n` +
+            `📍 Ubicación: Recibida`;
+        ctx.session.step = 'idle';
+        ctx.session.currentRegistration = undefined;
+        await ctx.reply(summary);
+    }
+    catch (error) {
+        console.error("Error al procesar confirmación:", error);
+        await ctx.reply("Lo siento, ha ocurrido un error al guardar los datos. Por favor, intenta nuevamente.");
     }
 });
 // Iniciar el bot
