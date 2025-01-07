@@ -1,4 +1,5 @@
 import { createClient } from '@supabase/supabase-js/dist/main/index';
+import { Bot } from "grammy";
 import dotenv from 'dotenv';
 import path from 'path';
 import fetch from 'cross-fetch';
@@ -7,9 +8,12 @@ import { RealEstate, Listing, RealEstateContactInfo } from '../types/types';
 // Cargar variables de entorno
 dotenv.config({ path: path.join(__dirname, '../../.env') });
 
-if (!process.env.SUPABASE_URL || !process.env.SUPABASE_KEY) {
-    throw new Error('Las credenciales de Supabase son requeridas');
+if (!process.env.SUPABASE_URL || !process.env.SUPABASE_KEY || !process.env.BOT_TOKEN) {
+    throw new Error('Las credenciales de Supabase y BOT_TOKEN son requeridas');
 }
+
+// Crear instancia del bot para notificaciones
+const notificationBot = new Bot(process.env.BOT_TOKEN);
 
 // Crear el cliente de Supabase con opciones adicionales
 export const supabase = createClient(
@@ -61,19 +65,92 @@ export async function createUser(telegramId: string, username: string): Promise<
     }
 }
 
-export async function getUserByTelegramId(telegramId: string): Promise<User | null> {
+export async function getUserByTelegramId(telegram_id: string, username?: string) {
     try {
         const { data, error } = await supabase
             .from('users')
             .select('*')
-            .eq('telegram_id', telegramId)
+            .eq('telegram_id', telegram_id)
             .single();
 
-        if (error) throw error;
+        if (error) {
+            if (error.code === 'PGRST116') {
+                // Usuario no encontrado, crearlo como pendiente
+                const { data: newUser, error: createError } = await supabase
+                    .from('users')
+                    .insert([{
+                        telegram_id,
+                        username: username || telegram_id, // Usar el username o el ID como fallback
+                        role: 'user',
+                        status: 'pending',
+                        created_at: new Date().toISOString()
+                    }])
+                    .select()
+                    .single();
+
+                if (createError) {
+                    console.error('Error creating new user:', createError);
+                    return null;
+                }
+
+                // Notificar a los administradores con más información
+                const userInfo = username ? `@${username} (ID: ${telegram_id})` : `ID: ${telegram_id}`;
+                notifyAdmins(`🆕 Nuevo usuario pendiente de aprobación:\n${userInfo}`);
+                return newUser;
+            }
+            console.error('Error getting user:', error);
+            return null;
+        }
+
         return data;
     } catch (error) {
-        console.error('Error getting user:', error);
+        console.error('Error in getUserByTelegramId:', error);
         return null;
+    }
+}
+
+async function notifyAdmins(message: string) {
+    try {
+        const { data: admins } = await supabase
+            .from('users')
+            .select('telegram_id')
+            .eq('role', 'admin');
+
+        if (admins && admins.length > 0) {
+            for (const admin of admins) {
+                try {
+                    // Extraer el telegram_id del mensaje
+                    const idMatch = message.match(/ID: (\d+)/);
+                    const userId = idMatch ? idMatch[1] : null;
+
+                    if (userId) {
+                        const keyboard = {
+                            inline_keyboard: [
+                                [
+                                    { text: "✅ Aprobar", callback_data: `approve_${userId}` },
+                                    { text: "❌ Rechazar", callback_data: `reject_${userId}` }
+                                ],
+                                [
+                                    { text: "⏳ Decidir más tarde", callback_data: `later_${userId}` }
+                                ]
+                            ]
+                        };
+
+                        await notificationBot.api.sendMessage(admin.telegram_id, message, {
+                            reply_markup: keyboard
+                        });
+                    } else {
+                        await notificationBot.api.sendMessage(admin.telegram_id, message);
+                    }
+                } catch (error) {
+                    console.error(`Error sending notification to admin ${admin.telegram_id}:`, error);
+                }
+            }
+        } else {
+            console.warn('No admins found to notify');
+        }
+    } catch (error) {
+        console.error('Error notifying admins:', error);
     }
 }
 

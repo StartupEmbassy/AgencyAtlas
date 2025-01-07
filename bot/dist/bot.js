@@ -36,7 +36,7 @@ bot.command("start", async (ctx) => {
             "Te guiaré paso a paso en el proceso de registro.";
         await ctx.reply(welcomeMessage);
         // Verificar si el usuario ya existe
-        const user = await (0, supabase_1.getUserByTelegramId)(ctx.from?.id.toString() || '');
+        const user = await (0, supabase_1.getUserByTelegramId)(ctx.from?.id.toString() || '', ctx.from?.username);
         if (!user) {
             await ctx.reply("Para comenzar, necesitas registrarte. Tu solicitud será enviada a los administradores para aprobación.");
         }
@@ -726,13 +726,18 @@ function formatUrlSummary(urls, validations) {
         let summary = `${url}${validation.isValid ? ' ✅' : ' ❌'}`;
         if (validation.isValid && validation.confidence) {
             summary += ` (${Math.round(validation.confidence * 100)}% match)\n`;
-            summary += `📋 Validación web:\n`;
-            if (validation.businessName) {
-                summary += `- Nombre en web: ${validation.businessName}\n`;
+            if (validation.webSummary) {
+                summary += `📋 Verificado en web:\n`;
+                summary += `- Negocio: ${validation.webSummary.title}\n`;
+                summary += `- Ubicación: ${validation.webSummary.location}\n`;
+                summary += `- Tipo: ${validation.webSummary.type}\n`;
             }
-            if (validation.extractedText) {
-                const firstLine = validation.extractedText.split('\n')[0];
-                summary += `- Título web: ${firstLine}\n`;
+            const evidence = validation.validationDetails?.foundEvidence;
+            if (evidence && evidence.length > 0) {
+                summary += `✨ Evidencias encontradas:\n`;
+                evidence.forEach(item => {
+                    summary += `- ${item}\n`;
+                });
             }
         }
         else if (!validation.isValid) {
@@ -747,13 +752,18 @@ function formatUrlSummary(urls, validations) {
         let summary = `${url}${validation.isValid ? ' ✅' : ' ❌'}`;
         if (validation.isValid && validation.confidence) {
             summary += ` (${Math.round(validation.confidence * 100)}% match)\n`;
-            summary += `📋 Validación web:\n`;
-            if (validation.businessName) {
-                summary += `- Nombre en web: ${validation.businessName}\n`;
+            if (validation.webSummary) {
+                summary += `📋 Verificado en web:\n`;
+                summary += `- Negocio: ${validation.webSummary.title}\n`;
+                summary += `- Ubicación: ${validation.webSummary.location}\n`;
+                summary += `- Tipo: ${validation.webSummary.type}\n`;
             }
-            if (validation.extractedText) {
-                const firstLine = validation.extractedText.split('\n')[0];
-                summary += `- Título web: ${firstLine}\n`;
+            const evidence = validation.validationDetails?.foundEvidence;
+            if (evidence && evidence.length > 0) {
+                summary += `✨ Evidencias encontradas:\n`;
+                evidence.forEach(item => {
+                    summary += `- ${item}\n`;
+                });
             }
         }
         else if (!validation.isValid) {
@@ -762,6 +772,100 @@ function formatUrlSummary(urls, validations) {
         return summary;
     }).join('\n\n');
 }
+// Manejadores para los botones de aprobación de usuarios
+bot.callbackQuery(/^approve_(\d+)$/, async (ctx) => {
+    try {
+        const userId = ctx.match[1];
+        await ctx.answerCallbackQuery("✅ Usuario aprobado");
+        const admin = await (0, supabase_1.getUserByTelegramId)(ctx.from.id.toString());
+        if (!admin || admin.role !== 'admin') {
+            await ctx.reply("No tienes permisos para ejecutar esta acción.");
+            return;
+        }
+        const success = await (0, supabase_1.updateUserStatus)(userId, 'approved');
+        if (success) {
+            try {
+                // Mensaje detallado para el usuario
+                const userMessage = `✅ ¡Tu solicitud ha sido aprobada!\n\n` +
+                    `Ahora puedes comenzar a usar el bot:\n` +
+                    `1. Envía una foto de una inmobiliaria para registrarla\n` +
+                    `2. Sigue las instrucciones paso a paso\n` +
+                    `3. ¡Listo!\n\n` +
+                    `Si tienes dudas, no dudes en contactar con un administrador.`;
+                await ctx.api.sendMessage(parseInt(userId), userMessage);
+                console.log(`Notificación enviada al usuario ${userId}`);
+                // Confirmar al admin
+                await ctx.editMessageText(`${ctx.callbackQuery.message?.text}\n\n` +
+                    `✅ Usuario aprobado y notificado`, { reply_markup: { inline_keyboard: [] } });
+            }
+            catch (error) {
+                console.error(`Error notificando al usuario ${userId}:`, error);
+                await ctx.editMessageText(`${ctx.callbackQuery.message?.text}\n\n` +
+                    `✅ Usuario aprobado pero no se pudo notificar`, { reply_markup: { inline_keyboard: [] } });
+            }
+        }
+        else {
+            await ctx.reply("Error al aprobar el usuario.");
+        }
+    }
+    catch (error) {
+        console.error("Error en approve callback:", error);
+        await ctx.reply("Error al procesar la aprobación.");
+    }
+});
+bot.callbackQuery(/^reject_(\d+)$/, async (ctx) => {
+    try {
+        const userId = ctx.match[1];
+        await ctx.answerCallbackQuery("❌ Usuario rechazado");
+        const admin = await (0, supabase_1.getUserByTelegramId)(ctx.from.id.toString());
+        if (!admin || admin.role !== 'admin') {
+            await ctx.reply("No tienes permisos para ejecutar esta acción.");
+            return;
+        }
+        const success = await (0, supabase_1.updateUserStatus)(userId, 'rejected');
+        if (success) {
+            try {
+                // Mensaje detallado para el usuario
+                const userMessage = `❌ Lo sentimos, tu solicitud ha sido rechazada.\n\n` +
+                    `Si crees que esto es un error o necesitas más información, ` +
+                    `por favor contacta con un administrador.`;
+                await ctx.api.sendMessage(parseInt(userId), userMessage);
+                console.log(`Notificación enviada al usuario ${userId}`);
+                // Confirmar al admin
+                await ctx.editMessageText(`${ctx.callbackQuery.message?.text}\n\n` +
+                    `❌ Usuario rechazado y notificado`, { reply_markup: { inline_keyboard: [] } });
+            }
+            catch (error) {
+                console.error(`Error notificando al usuario ${userId}:`, error);
+                await ctx.editMessageText(`${ctx.callbackQuery.message?.text}\n\n` +
+                    `❌ Usuario rechazado pero no se pudo notificar`, { reply_markup: { inline_keyboard: [] } });
+            }
+        }
+        else {
+            await ctx.reply("Error al rechazar el usuario.");
+        }
+    }
+    catch (error) {
+        console.error("Error en reject callback:", error);
+        await ctx.reply("Error al procesar el rechazo.");
+    }
+});
+bot.callbackQuery(/^later_(\d+)$/, async (ctx) => {
+    try {
+        await ctx.answerCallbackQuery("⏳ Decisión pospuesta");
+        const admin = await (0, supabase_1.getUserByTelegramId)(ctx.from.id.toString());
+        if (!admin || admin.role !== 'admin') {
+            await ctx.reply("No tienes permisos para ejecutar esta acción.");
+            return;
+        }
+        // Ocultar los botones pero mantener el mensaje
+        await ctx.editMessageText(ctx.callbackQuery.message?.text + "\n\n⏳ Pendiente de revisión", { reply_markup: { inline_keyboard: [] } });
+    }
+    catch (error) {
+        console.error("Error en later callback:", error);
+        await ctx.reply("Error al procesar la acción.");
+    }
+});
 // Iniciar el bot
 try {
     bot.start();

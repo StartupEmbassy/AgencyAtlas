@@ -74,6 +74,12 @@ async function validateRealEstateUrl(url, businessName) {
                     "matchesBusiness": boolean,
                     "confidence": number (0-1),
                     "extractedBusinessName": string,
+                    "webSummary": {
+                        "title": string,
+                        "description": string,
+                        "location": string,
+                        "type": string
+                    },
                     "reasons": [
                         "razón 1: explicación detallada",
                         "razón 2: explicación detallada",
@@ -86,6 +92,8 @@ async function validateRealEstateUrl(url, businessName) {
                         "foundEvidence": string[]
                     }
                 }
+
+                Asegúrate de que el resumen web (webSummary) sea conciso y legible, sin caracteres especiales.
             `;
             const analysis = await groq.chat.completions.create({
                 messages: [{ role: "user", content: prompt }],
@@ -101,7 +109,9 @@ async function validateRealEstateUrl(url, businessName) {
                 matchesBusiness: result.matchesBusiness,
                 confidence: result.confidence,
                 businessName: result.extractedBusinessName,
-                extractedText: cleanText
+                extractedText: cleanText,
+                webSummary: result.webSummary,
+                validationDetails: result.validationDetails
             };
         }
         catch (error) {

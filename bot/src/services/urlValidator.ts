@@ -10,6 +10,18 @@ export interface UrlValidationResult {
     error?: string;
     businessName?: string;
     extractedText?: string;
+    webSummary?: {
+        title: string;
+        description: string;
+        location: string;
+        type: string;
+    };
+    validationDetails?: {
+        nameMatch: boolean;
+        addressMatch: boolean;
+        isRealEstateSite: boolean;
+        foundEvidence: string[];
+    };
 }
 
 export async function validateRealEstateUrl(url: string, businessName: string): Promise<UrlValidationResult> {
@@ -85,6 +97,12 @@ export async function validateRealEstateUrl(url: string, businessName: string): 
                     "matchesBusiness": boolean,
                     "confidence": number (0-1),
                     "extractedBusinessName": string,
+                    "webSummary": {
+                        "title": string,
+                        "description": string,
+                        "location": string,
+                        "type": string
+                    },
                     "reasons": [
                         "razón 1: explicación detallada",
                         "razón 2: explicación detallada",
@@ -97,6 +115,8 @@ export async function validateRealEstateUrl(url: string, businessName: string): 
                         "foundEvidence": string[]
                     }
                 }
+
+                Asegúrate de que el resumen web (webSummary) sea conciso y legible, sin caracteres especiales.
             `;
 
             const analysis = await groq.chat.completions.create({
@@ -115,7 +135,9 @@ export async function validateRealEstateUrl(url: string, businessName: string): 
                 matchesBusiness: result.matchesBusiness,
                 confidence: result.confidence,
                 businessName: result.extractedBusinessName,
-                extractedText: cleanText
+                extractedText: cleanText,
+                webSummary: result.webSummary,
+                validationDetails: result.validationDetails
             };
 
         } catch (error) {
