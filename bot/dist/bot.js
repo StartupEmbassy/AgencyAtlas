@@ -128,8 +128,20 @@ async function deletePreviousMessages(ctx) {
 }
 // Manejador de fotos
 bot.on("message:photo", async (ctx) => {
+    console.log("Recibida foto - iniciando proceso...");
     try {
-        logState(ctx, "📸 Recibida foto");
+        const user = await (0, supabase_1.getUserByTelegramId)(ctx.from?.id.toString() || '');
+        console.log("Estado del usuario:", user?.status);
+        if (!user) {
+            console.log("Usuario no encontrado");
+            await ctx.reply("Por favor, regístrate primero usando el comando /start");
+            return;
+        }
+        if (user.status !== 'approved') {
+            console.log("Usuario no aprobado");
+            await ctx.reply("Tu cuenta está pendiente de aprobación por un administrador.");
+            return;
+        }
         // Verificar si estamos en un estado válido para recibir fotos
         if (ctx.session.registration.step !== 'idle' && ctx.session.registration.step !== 'collecting_photos') {
             if (ctx.message?.message_id && ctx.chat) {
