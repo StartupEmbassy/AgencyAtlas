@@ -5,6 +5,8 @@ import { authMiddleware } from "./middlewares/auth";
 import { messageTrackerMiddleware } from "./middlewares/messageTracker";
 import { createRealEstate, getAdmins, updateUserStatus, getUserByTelegramId, uploadPhoto, createListing, createRealEstateContactInfo } from "./services/supabase";
 import { analyzeImage } from "./services/imageAnalysis";
+import { validateRealEstateUrl } from "./services/urlValidator";
+import type { UrlValidationResult } from "./services/urlValidator";
 import { deleteMessages, deleteMessageAfterTimeout } from "./services/messageManager";
 import { MyContext, SessionData, initialSession } from "./types/session";
 import { RealEstateRegistration } from "./types/types";
@@ -297,24 +299,54 @@ bot.callbackQuery("photos_done", async (ctx) => {
         for (const photo of analyzedPhotos) {
             const analysis = photo.analysis;
             if (analysis) {
-                // Nombre del negocio
+                // Nombre del negocio - Ya manejado con confidence
                 if (analysis.confidence && analysis.name && analysis.confidence > bestConfidence) {
                     bestName = analysis.name;
                     bestConfidence = analysis.confidence;
                 }
 
-                // Recopilar toda la información
-                if (analysis.qr_data) allQrData.add(analysis.qr_data);
-                if (analysis.web_url) allWebUrls.add(analysis.web_url);
+                // URLs - Validar formato y contar ocurrencias
+                if (analysis.web_url) {
+                    try {
+                        // Intentar crear URL para validar formato
+                        new URL(analysis.web_url.startsWith('http') ? analysis.web_url : `https://${analysis.web_url}`);
+                        allWebUrls.add(analysis.web_url);
+                    } catch (error) {
+                        console.log(`URL inválida ignorada: ${analysis.web_url}`);
+                    }
+                }
+
+                // QR - Solo añadir si parece un formato válido (al menos 5 caracteres)
+                if (analysis.qr_data && analysis.qr_data.length > 5) {
+                    allQrData.add(analysis.qr_data);
+                }
+
+                // Teléfonos - Validar formato básico
                 if (analysis.phone_numbers) {
-                    analysis.phone_numbers.forEach((phone: string) => allPhoneNumbers.add(phone));
+                    analysis.phone_numbers.forEach((phone: string) => {
+                        // Eliminar espacios y caracteres no numéricos excepto + para prefijo internacional
+                        const cleanPhone = phone.replace(/[^\d+]/g, '');
+                        if (cleanPhone.length >= 9) { // Mínimo 9 dígitos para un número válido
+                            allPhoneNumbers.add(cleanPhone);
+                        }
+                    });
                 }
+
+                // Emails - Validar formato
                 if (analysis.emails) {
-                    analysis.emails.forEach((email: string) => allEmails.add(email));
+                    analysis.emails.forEach((email: string) => {
+                        if (email.match(/^[^\s@]+@[^\s@]+\.[^\s@]+$/)) {
+                            allEmails.add(email);
+                        }
+                    });
                 }
-                if (analysis.business_hours && !businessHours) {
+
+                // Horario - Usar el más completo (más caracteres)
+                if (analysis.business_hours && (!businessHours || analysis.business_hours.length > businessHours.length)) {
                     businessHours = analysis.business_hours;
                 }
+
+                // Objetos detectados y razones de validación
                 if (analysis.objects_detected) {
                     analysis.objects_detected.forEach((obj: string) => allObjects.add(obj));
                 }
@@ -331,12 +363,46 @@ bot.callbackQuery("photos_done", async (ctx) => {
             return;
         }
 
+        // Si hay múltiples URLs, mostrarlas todas para que el usuario elija después
+        const multipleUrls = allWebUrls.size > 1;
+        const multipleQrs = allQrData.size > 1;
+
+        // Validar URLs si tenemos un nombre de negocio
+        let validatedUrls: Map<string, UrlValidationResult> = new Map();
+        if (bestName && allWebUrls.size > 0) {
+            const processingMsg = await ctx.reply("🔍 Validando URLs detectadas...");
+            
+            for (const url of allWebUrls) {
+                try {
+                    const validation = await validateRealEstateUrl(url, bestName);
+                    validatedUrls.set(url, validation);
+                } catch (error) {
+                    console.error(`Error validando URL ${url}:`, error);
+                }
+            }
+
+            // Borrar mensaje de procesamiento
+            if (ctx.chat) {
+                try {
+                    await ctx.api.deleteMessage(ctx.chat.id, processingMsg.message_id);
+                } catch (error) {
+                    console.error("Error al borrar mensaje de procesamiento:", error);
+                }
+            }
+        }
+
         // Actualizar el registro con toda la información recopilada
         if (ctx.session.registration.currentRegistration) {
             ctx.session.registration.currentRegistration.name = bestName;
             ctx.session.registration.currentRegistration.qr = Array.from(allQrData).join(', ');
-            ctx.session.registration.currentRegistration.web_url = Array.from(allWebUrls).join(', ');
-            // Guardar información de contacto para usar después
+            
+            // Filtrar solo las URLs válidas
+            const validUrls = Array.from(allWebUrls).filter(url => {
+                const validation = validatedUrls.get(url);
+                return validation?.isValid && validation.matchesBusiness;
+            });
+            
+            ctx.session.registration.currentRegistration.web_url = validUrls.join(', ');
             ctx.session.registration.currentRegistration.contact_info = {
                 phone_numbers: Array.from(allPhoneNumbers),
                 emails: Array.from(allEmails),
@@ -344,14 +410,15 @@ bot.callbackQuery("photos_done", async (ctx) => {
             };
         }
 
-        // Mostrar resumen de la información detectada
+        // Mostrar resumen de la información detectada con advertencias si hay datos múltiples
         const summary = `He analizado las fotos ${usingGroq ? 'usando Groq' : 'usando Gemini'} y encontrado:\n\n` +
-            `🏢 Nombre: ${bestName || 'No detectado'}\n` +
-            `📱 QR: ${allQrData.size > 0 ? 'Detectado' : 'No detectado'}\n` +
-            `🌐 URLs: ${Array.from(allWebUrls).join(', ') || 'No detectadas'}\n` +
+            `🏢 Nombre: ${bestName || 'No detectado'}${bestConfidence ? ` (Confianza: ${Math.round(bestConfidence * 100)}%)` : ''}\n` +
+            `📱 QR: ${allQrData.size > 0 ? (multipleQrs ? '⚠️ Múltiples QRs detectados:\n' + Array.from(allQrData).join('\n') : 'Detectado') : 'No detectado'}\n` +
+            `🌐 URLs: ${allWebUrls.size > 0 ? formatUrlSummary(allWebUrls, validatedUrls) : 'No detectadas'}\n` +
             `☎️ Teléfonos: ${Array.from(allPhoneNumbers).join(', ') || 'No detectados'}\n` +
             `📧 Emails: ${Array.from(allEmails).join(', ') || 'No detectados'}\n` +
             `🕒 Horario: ${businessHours || 'No detectado'}\n\n` +
+            `${multipleUrls || multipleQrs ? '⚠️ Se han detectado múltiples valores para algunos campos. Por favor, verifica la información.\n\n' : ''}` +
             `¿Los datos son correctos?`;
 
         const keyboard = new InlineKeyboard()
@@ -749,6 +816,57 @@ function createNewRegistration(initial: Partial<RealEstateRegistration> = {}): R
         photos: [],
         ...initial
     };
+}
+
+// Función helper para formatear el resumen de URLs
+function formatUrlSummary(urls: Set<string>, validations: Map<string, UrlValidationResult>): string {
+    if (urls.size === 0) return 'No detectadas';
+    if (urls.size === 1) {
+        const url = Array.from(urls)[0];
+        const validation = validations.get(url);
+        if (!validation) return url;
+        
+        let summary = `${url}${validation.isValid ? ' ✅' : ' ❌'}`;
+        
+        if (validation.isValid && validation.confidence) {
+            summary += ` (${Math.round(validation.confidence * 100)}% match)\n`;
+            summary += `📋 Validación web:\n`;
+            if (validation.businessName) {
+                summary += `- Nombre en web: ${validation.businessName}\n`;
+            }
+            if (validation.extractedText) {
+                const firstLine = validation.extractedText.split('\n')[0];
+                summary += `- Título web: ${firstLine}\n`;
+            }
+        } else if (!validation.isValid) {
+            summary += ` - ${validation.error || 'URL inválida'}`;
+        }
+        
+        return summary;
+    }
+
+    return '⚠️ Múltiples URLs detectadas:\n' + Array.from(urls).map(url => {
+        const validation = validations.get(url);
+        if (!validation) return url;
+        
+        let summary = `${url}${validation.isValid ? ' ✅' : ' ❌'}`;
+        
+        if (validation.isValid && validation.confidence) {
+            summary += ` (${Math.round(validation.confidence * 100)}% match)\n`;
+            summary += `📋 Validación web:\n`;
+            if (validation.businessName) {
+                summary += `- Nombre en web: ${validation.businessName}\n`;
+            }
+            if (validation.extractedText) {
+                const firstLine = validation.extractedText.split('\n')[0];
+                summary += `- Título web: ${firstLine}\n`;
+            }
+        } else if (!validation.isValid) {
+            summary += ` - ${validation.error || 'URL inválida'}`;
+        }
+        
+        return summary;
+    }).join('\n\n');
 }
 
 // Iniciar el bot
