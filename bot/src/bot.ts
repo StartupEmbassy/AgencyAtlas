@@ -4,7 +4,7 @@ import path from "path";
 import { authMiddleware } from "./middlewares/auth";
 import { messageTrackerMiddleware } from "./middlewares/messageTracker";
 import { createRealEstate, getAdmins, updateUserStatus, getUserByTelegramId, uploadPhoto, createListing, createRealEstateContactInfo } from "./services/supabase";
-import { analyzeImageWithGemini } from "./services/gemini";
+import { analyzeImage } from "./services/imageAnalysis";
 import { deleteMessages, deleteMessageAfterTimeout } from "./services/messageManager";
 import { MyContext, SessionData, initialSession } from "./types/session";
 import { RealEstateRegistration } from "./types/types";
@@ -195,20 +195,45 @@ bot.callbackQuery("photos_done", async (ctx) => {
 
         // Analizar todas las fotos con Gemini
         const analyzedPhotos = [];
+        let geminiError = false;
+        let errorMessage = '';
+
         for (const photo of ctx.session.registration.currentRegistration.photos) {
             const file = await ctx.api.getFile(photo.file_id);
             const photoUrl = `https://api.telegram.org/file/bot${process.env.BOT_TOKEN}/${file.file_path}`;
-            const analysis = await analyzeImageWithGemini(photoUrl);
+            const analysis = await analyzeImage(photoUrl);
+            
+            // Verificar si hubo error en el análisis
+            if ('error' in analysis && analysis.error) {
+                geminiError = true;
+                errorMessage = analysis.error_message || 'Error desconocido';
+                break;
+            }
+
             analyzedPhotos.push({
                 ...photo,
                 analysis,
-                is_main: analysis.objects_detected?.some(obj => 
+                is_main: analysis.objects_detected?.some((obj: string) => 
                     obj.toLowerCase().includes('storefront') || 
                     obj.toLowerCase().includes('facade') || 
                     obj.toLowerCase().includes('building') ||
                     obj.toLowerCase().includes('office')
                 ) ?? false
             });
+        }
+
+        // Si hubo error en Gemini, informar al usuario y dar opciones
+        if (geminiError) {
+            const keyboard = new InlineKeyboard()
+                .text("🔄 Reintentar", "photos_done")
+                .text("👤 Continuar sin análisis", "manual_input")
+                .row()
+                .text("❌ Cancelar", "cancel");
+
+            await ctx.reply(`⚠️ Error al analizar las imágenes: ${errorMessage}\n\nPuedes:\n- Reintentar el análisis\n- Continuar e introducir los datos manualmente\n- Cancelar el proceso`, {
+                reply_markup: keyboard
+            });
+            return;
         }
 
         // Actualizar las fotos con sus análisis
@@ -238,19 +263,19 @@ bot.callbackQuery("photos_done", async (ctx) => {
                 if (analysis.qr_data) allQrData.add(analysis.qr_data);
                 if (analysis.web_url) allWebUrls.add(analysis.web_url);
                 if (analysis.phone_numbers) {
-                    analysis.phone_numbers.forEach(phone => allPhoneNumbers.add(phone));
+                    analysis.phone_numbers.forEach((phone: string) => allPhoneNumbers.add(phone));
                 }
                 if (analysis.emails) {
-                    analysis.emails.forEach(email => allEmails.add(email));
+                    analysis.emails.forEach((email: string) => allEmails.add(email));
                 }
                 if (analysis.business_hours && !businessHours) {
                     businessHours = analysis.business_hours;
                 }
                 if (analysis.objects_detected) {
-                    analysis.objects_detected.forEach(obj => allObjects.add(obj));
+                    analysis.objects_detected.forEach((obj: string) => allObjects.add(obj));
                 }
                 if (analysis.validation_reasons) {
-                    analysis.validation_reasons.forEach(reason => validationReasons.add(reason));
+                    analysis.validation_reasons.forEach((reason: string) => validationReasons.add(reason));
                 }
             }
         }
@@ -525,6 +550,7 @@ bot.callbackQuery("confirm", async (ctx) => {
             name: ctx.session.registration.currentRegistration.name || '',
             photo_url: uploadedMainPhotoUrl,
             qr_info: ctx.session.registration.currentRegistration.qr || undefined,
+            web_url: ctx.session.registration.currentRegistration.web_url || undefined,
             latitude: ctx.session.registration.currentRegistration.location?.latitude || 0,
             longitude: ctx.session.registration.currentRegistration.location?.longitude || 0,
             is_active: true,
@@ -626,8 +652,12 @@ bot.on("message:location", async (ctx) => {
         const summary = `Por favor, verifica que los datos sean correctos:\n\n` +
             `📸 Foto: Recibida\n` +
             `🏢 Nombre: ${ctx.session.registration.currentRegistration.name}\n` +
-            `🔍 QR: ${ctx.session.registration.currentRegistration.qr}\n` +
-            `📍 Ubicación: Recibida\n\n` +
+            `🔍 Web: ${ctx.session.registration.currentRegistration.web_url || 'No detectada'}\n` +
+            `🔍 QR: ${ctx.session.registration.currentRegistration.qr || 'No detectado'}\n` +
+            `📍 Ubicación: Recibida\n` +
+            `☎️ Teléfonos: ${ctx.session.registration.currentRegistration.contact_info?.phone_numbers?.join(', ') || 'No detectados'}\n` +
+            `📧 Emails: ${ctx.session.registration.currentRegistration.contact_info?.emails?.join(', ') || 'No detectados'}\n` +
+            `🕒 Horario: ${ctx.session.registration.currentRegistration.contact_info?.business_hours || 'No detectado'}\n\n` +
             `¿Deseas guardar esta inmobiliaria?`;
 
         const keyboard = new InlineKeyboard()

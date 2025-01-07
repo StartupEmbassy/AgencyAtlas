@@ -39,18 +39,18 @@ export interface RealEstate {
     user_id: string;
     name: string;
     photo_url: string;
-    qr_info?: string;
+    qr_info?: string | null;
+    web_url?: string | null;
     latitude: number;
     longitude: number;
     created_by: string;
     updated_by: string;
     is_active: boolean;
-    validation_score?: number;
-    validation_reasons?: string[];
-    condition_score?: number;
-    image_quality?: any;
-    objects_detected?: string[];
-    text_content?: string;
+    validation_score?: number | null;
+    validation_reasons?: string[] | null;
+    condition_score?: number | null;
+    image_quality?: any | null;
+    objects_detected?: string[] | null;
 }
 
 export interface Listing {
