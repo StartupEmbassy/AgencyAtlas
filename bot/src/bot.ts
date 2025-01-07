@@ -193,33 +193,77 @@ bot.callbackQuery("photos_done", async (ctx) => {
             return;
         }
 
+        // Borrar mensajes anteriores
+        await deletePreviousMessages(ctx);
+
+        // Informar que comienza el análisis
+        const processingMsg = await ctx.reply("🔄 Analizando las fotos con Gemini...");
+
         // Analizar todas las fotos con Gemini
         const analyzedPhotos = [];
         let geminiError = false;
         let errorMessage = '';
+        let usingGroq = false;
 
         for (const photo of ctx.session.registration.currentRegistration.photos) {
             const file = await ctx.api.getFile(photo.file_id);
             const photoUrl = `https://api.telegram.org/file/bot${process.env.BOT_TOKEN}/${file.file_path}`;
-            const analysis = await analyzeImage(photoUrl);
             
-            // Verificar si hubo error en el análisis
-            if ('error' in analysis && analysis.error) {
+            try {
+                const analysis = await analyzeImage(photoUrl);
+                
+                // Verificar si hubo error en el análisis
+                if ('error' in analysis && analysis.error) {
+                    geminiError = true;
+                    errorMessage = analysis.error_message || 'Error desconocido';
+                    break;
+                }
+
+                // Actualizar mensaje de procesamiento según el proveedor
+                if (analysis.provider === 'groq' && !usingGroq && ctx.chat) {
+                    usingGroq = true;
+                    await ctx.api.editMessageText(
+                        ctx.chat.id,
+                        processingMsg.message_id,
+                        "⚠️ Gemini no está disponible, usando Groq como alternativa..."
+                    );
+                }
+
+                analyzedPhotos.push({
+                    ...photo,
+                    analysis,
+                    is_main: analysis.objects_detected?.some((obj: string) => 
+                        obj.toLowerCase().includes('storefront') || 
+                        obj.toLowerCase().includes('facade') || 
+                        obj.toLowerCase().includes('building') ||
+                        obj.toLowerCase().includes('office')
+                    ) ?? false
+                });
+
+                // Actualizar progreso
+                if (ctx.chat) {
+                    await ctx.api.editMessageText(
+                        ctx.chat.id,
+                        processingMsg.message_id,
+                        `${usingGroq ? "⚠️ Usando Groq: " : "🔄 Analizando: "}Foto ${analyzedPhotos.length}/${ctx.session.registration.currentRegistration.photos.length}...`
+                    );
+                }
+
+            } catch (error) {
+                console.error("Error al analizar foto:", error);
                 geminiError = true;
-                errorMessage = analysis.error_message || 'Error desconocido';
+                errorMessage = error instanceof Error ? error.message : 'Error desconocido';
                 break;
             }
+        }
 
-            analyzedPhotos.push({
-                ...photo,
-                analysis,
-                is_main: analysis.objects_detected?.some((obj: string) => 
-                    obj.toLowerCase().includes('storefront') || 
-                    obj.toLowerCase().includes('facade') || 
-                    obj.toLowerCase().includes('building') ||
-                    obj.toLowerCase().includes('office')
-                ) ?? false
-            });
+        // Borrar mensaje de procesamiento
+        if (ctx.chat) {
+            try {
+                await ctx.api.deleteMessage(ctx.chat.id, processingMsg.message_id);
+            } catch (error) {
+                console.error("Error al borrar mensaje de procesamiento:", error);
+            }
         }
 
         // Si hubo error en Gemini, informar al usuario y dar opciones
@@ -301,7 +345,7 @@ bot.callbackQuery("photos_done", async (ctx) => {
         }
 
         // Mostrar resumen de la información detectada
-        const summary = `He analizado las fotos y encontrado:\n\n` +
+        const summary = `He analizado las fotos ${usingGroq ? 'usando Groq' : 'usando Gemini'} y encontrado:\n\n` +
             `🏢 Nombre: ${bestName || 'No detectado'}\n` +
             `📱 QR: ${allQrData.size > 0 ? 'Detectado' : 'No detectado'}\n` +
             `🌐 URLs: ${Array.from(allWebUrls).join(', ') || 'No detectadas'}\n` +
