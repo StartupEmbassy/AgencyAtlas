@@ -286,23 +286,6 @@ export async function uploadPhoto(fileBuffer: Buffer, fileName: string): Promise
     }
 }
 
-// Función para crear un listing
-export async function createListing(data: Omit<Listing, 'id' | 'created_at' | 'updated_at'>): Promise<Listing | null> {
-    try {
-        const { data: listing, error } = await supabase
-            .from('listings')
-            .insert([data])
-            .select()
-            .single();
-
-        if (error) throw error;
-        return listing;
-    } catch (error) {
-        console.error('Error al crear listing:', error);
-        return null;
-    }
-}
-
 // Función para crear información de contacto
 export async function createRealEstateContactInfo(data: Omit<RealEstateContactInfo, 'id'>): Promise<RealEstateContactInfo | null> {
     try {
@@ -316,6 +299,76 @@ export async function createRealEstateContactInfo(data: Omit<RealEstateContactIn
         return contactInfo;
     } catch (error) {
         console.error('Error al crear información de contacto:', error);
+        return null;
+    }
+}
+
+export const createListing = async (
+    realEstateId: string, 
+    photoUrl: string, 
+    qrData: string | undefined,
+    webUrl: string | undefined,
+    userId: string
+): Promise<{ data: Listing | null; error: any }> => {
+    try {
+        // Primero verificar si ya existe un listing con ese QR
+        if (qrData) {
+            const { data: existingListing } = await supabase
+                .from('listings')
+                .select('*')
+                .eq('qr_data', qrData)
+                .eq('real_estate_id', realEstateId)
+                .single();
+
+            if (existingListing) {
+                return { data: existingListing, error: null };
+            }
+        }
+
+        // Si no existe, crear nuevo listing
+        const { data, error } = await supabase
+            .from('listings')
+            .insert({
+                real_estate_id: realEstateId,
+                photo_url: photoUrl,
+                qr_data: qrData,
+                web_url: webUrl,
+                created_by: userId,
+                updated_by: userId,
+                is_active: true
+            })
+            .select()
+            .single();
+
+        if (error) throw error;
+        return { data, error: null };
+    } catch (error) {
+        console.error('Error creating listing:', error);
+        return { data: null, error };
+    }
+};
+
+/**
+ * Verifica si ya existe un listing con el mismo QR para una inmobiliaria
+ */
+export async function checkExistingListing(realEstateId: string, qrData: string) {
+    try {
+        const { data, error } = await supabase
+            .from('listings')
+            .select('*')
+            .eq('real_estate_id', realEstateId)
+            .eq('qr_data', qrData)
+            .eq('is_active', true)
+            .single();
+
+        if (error) {
+            console.error('Error al verificar listing existente:', error);
+            return null;
+        }
+
+        return data;
+    } catch (error) {
+        console.error('Error al verificar listing existente:', error);
         return null;
     }
 } 

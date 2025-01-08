@@ -1,11 +1,10 @@
 import { MyContext } from "../types/session";
 import { InlineKeyboard } from "grammy";
-import { analyzeImage } from "../services/imageAnalysis";
 import { validateRealEstateUrl } from "../services/urlValidator";
-import { deletePreviousMessages } from "../utils/helpers";
+import { deletePreviousMessages, validateAndProcessQR, QRValidationResult, normalizeUrl, validatePhoneNumber } from "../utils/helpers";
 import { formatUrlSummary } from "../utils/helpers";
-import type { UrlValidationResult } from "../services/urlValidator";
-import type { PhotoRegistration } from "../types/types";
+import { analyzePhotosInBatches } from "../utils/photoUtils";
+import type { UrlValidationResult, PhotoRegistration } from "../types/types";
 
 // Helper para normalizar números de teléfono
 function normalizePhoneNumber(phone: string): string {
@@ -44,6 +43,12 @@ function areSimilarPhoneNumbers(phone1: string, phone2: string): boolean {
     return false;
 }
 
+interface QRInfo {
+    qrData: string;
+    photo: PhotoRegistration;
+    validation: QRValidationResult;
+}
+
 export async function handlePhotosDone(ctx: MyContext) {
     try {
         await ctx.answerCallbackQuery();
@@ -53,53 +58,79 @@ export async function handlePhotosDone(ctx: MyContext) {
             return;
         }
 
-        console.log(`🚀 Iniciando análisis de ${ctx.session.registration.currentRegistration.photos.length} fotos en paralelo`);
+        console.log(`🚀 Iniciando análisis de ${ctx.session.registration.currentRegistration.photos.length} fotos`);
 
         // Borrar mensajes anteriores
         await deletePreviousMessages(ctx);
 
         // Informar que comienza el análisis
-        const processingMsg = await ctx.reply("🔄 Analizando las fotos con Gemini...");
+        const processingMsg = await ctx.reply("🔄 Iniciando análisis de fotos...");
 
-        // Preparar todas las promesas de análisis
-        console.log('📸 Preparando promesas de análisis...');
-        const analysisPromises = ctx.session.registration.currentRegistration.photos.map(async (photo, index) => {
-            console.log(`📸 [Foto ${index + 1}] Obteniendo URL de Telegram...`);
-            const file = await ctx.api.getFile(photo.file_id);
-            const photoUrl = `https://api.telegram.org/file/bot${process.env.BOT_TOKEN}/${file.file_path}`;
-            console.log(`📸 [Foto ${index + 1}] Iniciando análisis con Gemini/Groq...`);
-            const startTime = Date.now();
-            const analysis = await analyzeImage(photoUrl);
-            const endTime = Date.now();
-            console.log(`📸 [Foto ${index + 1}] Análisis completado en ${endTime - startTime}ms usando ${analysis.provider}`);
-            return { photo, analysis, analysisTime: endTime - startTime };
-        });
-
-        // Analizar todas las fotos en paralelo
+        // Analizar fotos en lotes
         let analyzedPhotos: PhotoRegistration[] = [];
         let geminiError = false;
         let errorMessage = '';
         let usingGroq = false;
 
         try {
-            console.log('🔄 Iniciando Promise.all para análisis paralelo...');
-            const startTime = Date.now();
-            const analysisResults = await Promise.all(analysisPromises);
-            const endTime = Date.now();
-            console.log(`✅ Análisis paralelo completado en ${endTime - startTime}ms`);
-            
-            // Estadísticas de tiempo
-            const times = analysisResults.map(r => r.analysisTime);
-            console.log(`📊 Estadísticas de tiempo de análisis:
-            - Tiempo total: ${endTime - startTime}ms
-            - Tiempo promedio por foto: ${times.reduce((a, b) => a + b, 0) / times.length}ms
-            - Tiempo mínimo: ${Math.min(...times)}ms
-            - Tiempo máximo: ${Math.max(...times)}ms`);
+            // Actualizar mensaje con el número total de fotos
+            await ctx.api.editMessageText(
+                ctx.chat!.id,
+                processingMsg.message_id,
+                `🔄 Iniciando análisis de ${ctx.session.registration.currentRegistration.photos.length} fotos...`
+            );
 
+            const analysisResults = await analyzePhotosInBatches(
+                ctx, 
+                ctx.session.registration.currentRegistration.photos,
+                1  // Procesar 1 foto a la vez
+            );
+            
             // Procesar los resultados
+            let processedCount = 0;
             for (const result of analysisResults) {
                 const { photo, analysis } = result;
+                processedCount++;
                 
+                // Construir mensaje de progreso detallado
+                let statusMsg = `📸 Foto ${processedCount}/${analysisResults.length}\n`;
+                
+                if (analysis.provider) {
+                    statusMsg += `🤖 Usando ${analysis.provider === 'groq' ? 'Groq' : 'Gemini'}...\n`;
+                }
+
+                // Si hay análisis de QR en progreso
+                if (analysis.qr_data) {
+                    statusMsg += `✨ QR encontrado: ${analysis.qr_data.substring(0, 30)}${analysis.qr_data.length > 30 ? '...' : ''}\n`;
+                }
+
+                // Si hay detección de elementos
+                if (analysis.objects_detected?.length) {
+                    const mainObjects = analysis.objects_detected.slice(0, 3);
+                    statusMsg += `🔍 Detectado: ${mainObjects.join(', ')}${analysis.objects_detected.length > 3 ? '...' : ''}\n`;
+                }
+
+                // Si se encontró un nombre
+                if (analysis.name) {
+                    statusMsg += `🏢 Nombre: ${analysis.name}\n`;
+                }
+
+                // Si se encontraron contactos
+                if (analysis.phone_numbers?.length || analysis.emails?.length) {
+                    statusMsg += `📞 Información de contacto encontrada\n`;
+                }
+
+                try {
+                    // Actualizar mensaje de estado
+                    await ctx.api.editMessageText(
+                        ctx.chat!.id,
+                        processingMsg.message_id,
+                        statusMsg
+                    );
+                } catch (error) {
+                    console.error("Error al actualizar mensaje de progreso:", error);
+                }
+
                 if ('error' in analysis && analysis.error) {
                     geminiError = true;
                     errorMessage = analysis.error_message || 'Error desconocido';
@@ -122,22 +153,23 @@ export async function handlePhotosDone(ctx: MyContext) {
                 });
             }
 
-            // Actualizar mensaje de procesamiento según el proveedor
-            if (ctx.chat) {
-                if (usingGroq) {
-                    await ctx.api.editMessageText(
-                        ctx.chat.id,
-                        processingMsg.message_id,
-                        "⚠️ Gemini no está disponible, usando Groq como alternativa..."
-                    );
-                } else {
-                    await ctx.api.editMessageText(
-                        ctx.chat.id,
-                        processingMsg.message_id,
-                        "✅ Análisis completado"
-                    );
-                }
+            // Mensaje final más informativo
+            const finalMsg = usingGroq 
+                ? "⚠️ Gemini no disponible, usando Groq como alternativa...\n✅ Análisis completado\n📊 Procesando resultados..."
+                : "✅ Análisis completado con éxito\n📊 Procesando resultados finales...";
+
+            try {
+                await ctx.api.editMessageText(
+                    ctx.chat!.id,
+                    processingMsg.message_id,
+                    finalMsg
+                );
+            } catch (error) {
+                console.error("Error al actualizar mensaje final:", error);
             }
+
+            // Esperar un momento para que el usuario pueda leer el mensaje
+            await new Promise(resolve => setTimeout(resolve, 2000));
 
         } catch (error) {
             console.error("Error al analizar fotos:", error);
@@ -174,13 +206,55 @@ export async function handlePhotosDone(ctx: MyContext) {
         // Obtener el mejor nombre y otra información relevante
         let bestName: string | undefined;
         let bestConfidence = 0;
-        let allQrData: Set<string> = new Set();
         let allWebUrls: Set<string> = new Set();
         let allObjects: Set<string> = new Set();
         let validationReasons: Set<string> = new Set();
         let allPhoneNumbers: Set<string> = new Set();
         let allEmails: Set<string> = new Set();
         let businessHours: string | undefined;
+
+        // Crear un mapa para rastrear qué fotos tienen cada QR
+        let qrInfoMap = new Map<string, QRInfo>();
+        
+        // Procesar QRs primero
+        for (const photo of analyzedPhotos) {
+            if (photo.analysis?.qr_data) {
+                const validation = await validateAndProcessQR(photo.analysis.qr_data);
+                if (validation.isValid) {
+                    qrInfoMap.set(photo.analysis.qr_data, {
+                        qrData: photo.analysis.qr_data,
+                        photo,
+                        validation
+                    });
+                    
+                    if (validation.url) {
+                        allWebUrls.add(normalizeUrl(validation.url));
+                    }
+                }
+            }
+        }
+
+        // Procesar URLs detectadas en texto
+        for (const photo of analyzedPhotos) {
+            if (photo.analysis?.web_url) {
+                try {
+                    const validation = await validateAndProcessQR(photo.analysis.web_url);
+                    if (validation.isValid && validation.url && !allWebUrls.has(validation.url)) {
+                        allWebUrls.add(normalizeUrl(validation.url));
+                    }
+                } catch (error) {
+                    console.log(`URL inválida ignorada: ${photo.analysis.web_url}`);
+                }
+            }
+        }
+
+        // Detectar QRs duplicados
+        const duplicateQrs = Array.from(qrInfoMap.entries())
+            .filter(([qrData, info]) => {
+                // Contar cuántas fotos tienen este mismo QR
+                return analyzedPhotos.filter(p => p.analysis?.qr_data === qrData).length > 1;
+            })
+            .map(([qrData, _]) => qrData);
 
         for (const photo of analyzedPhotos) {
             const analysis = photo.analysis;
@@ -194,34 +268,23 @@ export async function handlePhotosDone(ctx: MyContext) {
                 // URLs - Validar formato y contar ocurrencias
                 if (analysis.web_url) {
                     try {
-                        // Intentar crear URL para validar formato
-                        new URL(analysis.web_url.startsWith('http') ? analysis.web_url : `https://${analysis.web_url}`);
-                        allWebUrls.add(analysis.web_url);
+                        const normalizedUrl = normalizeUrl(analysis.web_url);
+                        if (!allWebUrls.has(normalizedUrl)) {
+                            allWebUrls.add(normalizedUrl);
+                        }
                     } catch (error) {
                         console.log(`URL inválida ignorada: ${analysis.web_url}`);
                     }
                 }
 
-                // QR - Solo añadir si parece un formato válido (al menos 5 caracteres)
-                if (analysis.qr_data && analysis.qr_data.length > 5) {
-                    allQrData.add(analysis.qr_data);
-                }
+                // QR - Ya procesado anteriormente en qrPhotoMap
 
-                // Teléfonos - Validar formato básico y eliminar duplicados
+                // Teléfonos - Validar formato básico
                 if (analysis.phone_numbers) {
-                    analysis.phone_numbers.forEach((phone: string) => {
-                        const normalizedPhone = normalizePhoneNumber(phone);
-                        
-                        // Solo añadir si tiene al menos 9 dígitos y no es similar a ninguno existente
-                        if (normalizedPhone.replace(/[^\d]/g, '').length >= 9) {
-                            // Verificar si ya existe un número similar
-                            const hasSimilar = Array.from(allPhoneNumbers).some(existingPhone => 
-                                areSimilarPhoneNumbers(normalizedPhone, existingPhone)
-                            );
-                            
-                            if (!hasSimilar) {
-                                allPhoneNumbers.add(normalizedPhone);
-                            }
+                    analysis.phone_numbers.forEach((phone) => {
+                        const validPhone = validatePhoneNumber(phone);
+                        if (validPhone) {
+                            allPhoneNumbers.add(validPhone);
                         }
                     });
                 }
@@ -259,45 +322,126 @@ export async function handlePhotosDone(ctx: MyContext) {
 
         // Si hay múltiples URLs, mostrarlas todas para que el usuario elija después
         const multipleUrls = allWebUrls.size > 1;
-        const multipleQrs = allQrData.size > 1;
 
         // Validar URLs si tenemos un nombre de negocio
         let validatedUrls: Map<string, UrlValidationResult> = new Map();
+        let bestUrl: string | undefined;
+        let bestUrlScore = 0;
+
         if (bestName && allWebUrls.size > 0) {
-            const processingMsg = await ctx.reply("🔍 Validando URLs detectadas...");
+            const processingMsg = await ctx.reply(`🔍 Analizando ${allWebUrls.size} URLs detectadas para encontrar la web oficial de ${bestName}...`);
             
-            // Validar todas las URLs en paralelo
+            // Filtrar URLs válidas antes de validar
+            const validUrls = Array.from(allWebUrls).filter(url => {
+                try {
+                    new URL(url.startsWith('http') ? url : `https://${url}`);
+                    return true;
+                } catch {
+                    return false;
+                }
+            });
+            
+            // Mostrar progreso
+            await ctx.api.editMessageText(
+                ctx.chat!.id,
+                processingMsg.message_id,
+                `🔍 Validando ${validUrls.length} URLs válidas...`
+            );
+            
+            // Validar URLs en paralelo
             const urlValidations = await Promise.all(
-                Array.from(allWebUrls).map(url => validateRealEstateUrl(url, bestName!))
+                validUrls.map(url => validateRealEstateUrl(url, bestName!))
             );
 
-            // Guardar los resultados
-            Array.from(allWebUrls).forEach((url, index) => {
-                validatedUrls.set(url, urlValidations[index]);
+            // Mostrar progreso
+            await ctx.api.editMessageText(
+                ctx.chat!.id,
+                processingMsg.message_id,
+                `✅ URLs validadas. Calculando puntuaciones...`
+            );
+
+            // Procesar resultados y calcular scores
+            validUrls.forEach((url, index) => {
+                const validation = urlValidations[index];
+                validatedUrls.set(url, validation);
+                
+                // Calcular score para esta URL
+                let urlScore = 0;
+                if (validation.isValid && validation.matchesBusiness) {
+                    // Puntuación base por confianza (hasta 30 puntos)
+                    urlScore += validation.confidence * 30;
+                    
+                    // Bonus por ser sitio web principal vs listing (hasta 40 puntos)
+                    if (validation.validationDetails?.foundEvidence?.some(
+                        e => e.includes('Descripción de servicios de inmobiliaria')
+                    )) {
+                        urlScore += 40;
+                    }
+                    
+                    // Bonus por coincidencia exacta de nombre (hasta 30 puntos)
+                    if (bestName && validation.webSummary?.title) {
+                        const normalizedTitle = validation.webSummary.title.toLowerCase();
+                        const normalizedName = bestName.toLowerCase();
+                        
+                        // Coincidencia exacta
+                        if (normalizedTitle.includes(normalizedName)) {
+                            urlScore += 30;
+                        }
+                        // Coincidencia parcial (al menos la mitad de las palabras)
+                        else {
+                            const nameWords = normalizedName.split(/\s+/);
+                            const matchingWords = nameWords.filter(word => 
+                                normalizedTitle.includes(word)
+                            ).length;
+                            
+                            if (matchingWords >= nameWords.length / 2) {
+                                urlScore += 15; // Mitad de puntos por coincidencia parcial
+                            }
+                        }
+                    }
+
+                    // Penalización para URLs que parecen listings
+                    if (url.includes('listing') || 
+                        url.includes('property') || 
+                        url.includes('eqrco.de') ||
+                        validation.webSummary?.title?.toLowerCase().includes('listing')) {
+                        urlScore *= 0.5; // Reducir score a la mitad para listings
+                    }
+                    
+                    // Actualizar mejor URL si el score es mayor
+                    if (urlScore > bestUrlScore) {
+                        bestUrlScore = urlScore;
+                        bestUrl = url;
+                    }
+                }
             });
 
+            // Mostrar resultado final
+            await ctx.api.editMessageText(
+                ctx.chat!.id,
+                processingMsg.message_id,
+                bestUrl 
+                    ? `✅ Web oficial encontrada: ${bestUrl} (puntuación: ${Math.round(bestUrlScore)}%)`
+                    : `⚠️ No se encontró una web oficial válida entre las URLs analizadas.`
+            );
+
+            // Esperar un momento antes de borrar el mensaje
+            await new Promise(resolve => setTimeout(resolve, 3000));
+
             // Borrar mensaje de procesamiento
-            if (ctx.chat) {
-                try {
-                    await ctx.api.deleteMessage(ctx.chat.id, processingMsg.message_id);
-                } catch (error) {
-                    console.error("Error al borrar mensaje de procesamiento:", error);
-                }
+            try {
+                await ctx.api.deleteMessage(ctx.chat!.id, processingMsg.message_id);
+            } catch (error) {
+                console.error("Error al borrar mensaje de procesamiento:", error);
             }
         }
 
         // Actualizar el registro con toda la información recopilada
         if (ctx.session.registration.currentRegistration) {
             ctx.session.registration.currentRegistration.name = bestName;
-            ctx.session.registration.currentRegistration.qr = Array.from(allQrData).join(', ');
-            
-            // Filtrar solo las URLs válidas
-            const validUrls = Array.from(allWebUrls).filter(url => {
-                const validation = validatedUrls.get(url);
-                return validation?.isValid && validation.matchesBusiness;
-            });
-            
-            ctx.session.registration.currentRegistration.web_url = validUrls.join(', ');
+            ctx.session.registration.currentRegistration.qr = Array.from(qrInfoMap.keys()).join(', ');
+            // Usar la mejor URL encontrada
+            ctx.session.registration.currentRegistration.web_url = bestUrl;
             ctx.session.registration.currentRegistration.contact_info = {
                 phone_numbers: Array.from(allPhoneNumbers),
                 emails: Array.from(allEmails),
@@ -305,25 +449,61 @@ export async function handlePhotosDone(ctx: MyContext) {
             };
         }
 
-        // Mostrar resumen de la información detectada con advertencias si hay datos múltiples
-        const summary = `He analizado las fotos ${usingGroq ? 'usando Groq' : 'usando Gemini'} y encontrado:\n\n` +
-            `🏢 Nombre: ${bestName || 'No detectado'}${bestConfidence ? ` (Confianza: ${Math.round(bestConfidence * 100)}%)` : ''}\n` +
-            `📱 QR: ${allQrData.size > 0 ? (multipleQrs ? '⚠️ Múltiples QRs detectados:\n' + Array.from(allQrData).join('\n') : 'Detectado') : 'No detectado'}\n` +
-            `🌐 URLs: ${allWebUrls.size > 0 ? formatUrlSummary(allWebUrls, validatedUrls) : 'No detectadas'}\n` +
-            `☎️ Teléfonos: ${Array.from(allPhoneNumbers).join(', ') || 'No detectados'}\n` +
-            `📧 Emails: ${Array.from(allEmails).join(', ') || 'No detectados'}\n` +
-            `🕒 Horario: ${businessHours || 'No detectado'}\n\n` +
-            `${multipleUrls || multipleQrs ? '⚠️ Se han detectado múltiples valores para algunos campos. Por favor, verifica la información.\n\n' : ''}` +
-            `¿Los datos son correctos?`;
+        // Construir el mensaje de resumen
+        let summaryMessage = `He analizado las fotos usando ${usingGroq ? 'Groq' : 'Gemini'} y encontrado:\n\n`;
+        
+        // Nombre
+        if (bestName) {
+            summaryMessage += `🏢 Nombre: ${bestName}${bestConfidence ? ` (Confianza: ${Math.round(bestConfidence * 100)}%)` : ''}\n`;
+        }
 
+        // QRs
+        if (qrInfoMap.size > 0) {
+            summaryMessage += `📱 QR: ${qrInfoMap.size} QR(s) únicos detectados${qrInfoMap.size > 0 ? ' (algunos contienen URLs)' : ''}\n`;
+        }
+
+        // URLs
+        if (allWebUrls.size > 0) {
+            summaryMessage += `🌐 URLs: ${formatUrlSummary(allWebUrls, validatedUrls)}\n`;
+        }
+
+        // Teléfonos
+        if (allPhoneNumbers.size > 0) {
+            summaryMessage += `🔔 Teléfonos: ${Array.from(allPhoneNumbers).join(', ')}\n`;
+        }
+
+        // Emails
+        if (allEmails.size > 0) {
+            summaryMessage += `📧 Emails: ${Array.from(allEmails).join(', ')}\n`;
+        } else {
+            summaryMessage += `📧 Emails: No detectados\n`;
+        }
+
+        // Horario
+        if (businessHours) {
+            summaryMessage += `🕒 Horario: ${businessHours}\n`;
+        } else {
+            summaryMessage += `🕒 Horario: No detectado\n`;
+        }
+
+        // Actualizar el estado para indicar que esperamos confirmación
+        ctx.session.registration.step = 'waiting_confirmation';
+
+        // Enviar el resumen y preguntar si los datos son correctos
         const keyboard = new InlineKeyboard()
-            .text("✅ Sí, continuar", "confirm_info")
-            .text("❌ No, cancelar", "cancel");
+            .text("✅ Confirmar", "confirm")
+            .text("❌ Cancelar", "cancel");
 
-        await ctx.reply(summary, { reply_markup: keyboard });
+        const summaryMsg = await ctx.reply(summaryMessage + "\n¿Los datos son correctos?", {
+            reply_markup: keyboard,
+            parse_mode: "HTML"
+        });
+
+        // Guardar el resumen en la sesión para usarlo después
+        ctx.session.registration.summary = summaryMessage;
 
     } catch (error) {
-        console.error("Error al finalizar envío de fotos:", error);
-        await ctx.reply("Lo siento, ha ocurrido un error. Por favor, intenta nuevamente.");
+        console.error("Error al procesar la solicitud:", error);
+        await ctx.reply("Hubo un error al procesar la solicitud. Por favor, intenta nuevamente.");
     }
-} 
+}

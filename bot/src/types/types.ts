@@ -41,7 +41,6 @@ export interface RealEstate {
     user_id: string;
     name: string;
     photo_url: string;
-    qr_info?: string | null;
     web_url?: string | null;
     latitude: number;
     longitude: number;
@@ -59,7 +58,6 @@ export interface Listing {
     id: string;
     real_estate_id: string;
     photo_url: string;
-    qr_data?: string;
     web_url?: string;
     created_by: string;
     updated_by: string;
@@ -73,4 +71,60 @@ export interface RealEstateContactInfo {
     emails?: string[];
     business_hours?: string;
     services?: string[];
+}
+
+export interface ImageAnalysis {
+    name: string;
+    qr_data?: string;
+    web_url?: string;
+    listing_urls?: string[];
+    validation_score: number;
+    validation_reasons?: string[];
+    condition_score?: number;
+    image_quality?: any;
+    objects_detected?: string[];
+    phone_numbers?: string[];
+    emails?: string[];
+    business_hours?: string;
+    confidence?: number;
+    is_valid: boolean;
+    provider?: 'gemini' | 'groq';
+    error?: string;
+}
+
+export interface ListingPhoto {
+    photoId: string;
+    photoPath: string;
+    analysis?: ImageAnalysis;
+    qr_data?: string;
+}
+
+export interface UrlValidationResult {
+    isValid: boolean;
+    confidence: number;
+    matchesBusiness: boolean;
+    error?: string;
+    businessName?: string;
+    extractedText?: string;
+    webSummary?: {
+        title: string;
+        description: string;
+        location: string;
+        type: string;
+    };
+    validationDetails?: {
+        nameMatch: boolean;
+        addressMatch: boolean;
+        isRealEstateSite: boolean;
+        foundEvidence: string[];
+    };
+}
+
+export interface User {
+    id: string;
+    telegram_id: string;
+    username?: string;
+    role: 'admin' | 'user';
+    status: 'pending' | 'approved' | 'rejected';
+    created_at: Date;
 } 
