@@ -1,5 +1,6 @@
 import { GoogleGenerativeAI } from "@google/generative-ai";
 import Groq from "groq-sdk";
+import { IMAGE_ANALYSIS_PROMPT } from "../prompts/imageAnalysis";
 
 // Configurar clientes
 if (!process.env.GEMINI_API_KEY) {
@@ -57,20 +58,7 @@ async function analyzeWithGemini(imageUrl: string): Promise<ImageAnalysisResult>
                             data: Buffer.from(imageData).toString("base64")
                         }
                     },
-                    `Analyze this real estate agency image and provide ONLY a JSON object with this exact format:
-                    {
-                        "name": "the business name if visible (be very specific, this is critical)",
-                        "qr_data": "any QR code content if present",
-                        "web_url": "any website URL visible in the image",
-                        "validation_score": number from 0-100 indicating how clearly this is a real estate agency,
-                        "validation_reasons": ["list", "of", "reasons"],
-                        "condition_score": number from 0-100 indicating the condition of the property,
-                        "objects_detected": ["list", "of", "objects", "like", "storefront", "sign", "etc"],
-                        "phone_numbers": ["list", "of", "phone", "numbers", "found"],
-                        "emails": ["list", "of", "email", "addresses", "found"],
-                        "business_hours": "business hours if visible (in text format)",
-                        "confidence": number from 0-1 indicating confidence in business name detection
-                    }`
+                    IMAGE_ANALYSIS_PROMPT
                 ]);
 
                 const response_text = result.response.text();
@@ -119,20 +107,7 @@ async function analyzeWithGroq(imageUrl: string): Promise<ImageAnalysisResult> {
                     content: [
                         {
                             type: "text",
-                            text: `Analyze this real estate agency image and provide ONLY a JSON object with this exact format:
-                            {
-                                "name": "the business name if visible (be very specific, this is critical)",
-                                "qr_data": "any QR code content if present",
-                                "web_url": "any website URL visible in the image",
-                                "validation_score": number from 0-100 indicating how clearly this is a real estate agency,
-                                "validation_reasons": ["list", "of", "reasons"],
-                                "condition_score": number from 0-100 indicating the condition of the property,
-                                "objects_detected": ["list", "of", "objects", "like", "storefront", "sign", "etc"],
-                                "phone_numbers": ["list", "of", "phone", "numbers", "found"],
-                                "emails": ["list", "of", "email", "addresses", "found"],
-                                "business_hours": "business hours if visible (in text format)",
-                                "confidence": number from 0-1 indicating confidence in business name detection
-                            }`
+                            text: IMAGE_ANALYSIS_PROMPT
                         },
                         {
                             type: "image_url",

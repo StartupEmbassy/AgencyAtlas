@@ -1,25 +1,27 @@
+export interface PhotoRegistration {
+    file_id: string;
+    is_main: boolean | null;
+    analysis?: {
+        name?: string;
+        qr_data?: string;
+        web_url?: string;
+        validation_score?: number;
+        validation_reasons?: string[];
+        condition_score?: number;
+        image_quality?: any;
+        objects_detected?: string[];
+        phone_numbers?: string[];
+        emails?: string[];
+        business_hours?: string;
+        confidence?: number;
+    };
+}
+
 export interface RealEstateRegistration {
     started_at: number;
     last_update: number;
     messages_ids: number[];
-    photos: {
-        file_id: string;
-        is_main: boolean | null;
-        analysis?: {
-            name?: string;
-            qr_data?: string;
-            web_url?: string;
-            validation_score?: number;
-            validation_reasons?: string[];
-            condition_score?: number;
-            image_quality?: any;
-            objects_detected?: string[];
-            phone_numbers?: string[];
-            emails?: string[];
-            business_hours?: string;
-            confidence?: number;
-        };
-    }[];
+    photos: PhotoRegistration[];
     name?: string;
     qr?: string;
     web_url?: string;
