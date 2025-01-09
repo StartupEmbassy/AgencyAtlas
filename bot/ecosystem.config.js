@@ -4,7 +4,7 @@ require('dotenv').config({ path: path.join(__dirname, '.env') });
 module.exports = {
     apps: [{
       name: 'Agency Atlas Bot',
-      script: './dist/src/bot.js',
+      script: './src/bot.js',
       watch: false,
       exec_mode: 'fork',
       env: {

@@ -18,7 +18,7 @@ async function downloadImage(url: string, retries = 3): Promise<Buffer> {
             console.log(`📥 Intento ${attempt}/${retries} de descarga...`);
             return await new Promise((resolve, reject) => {
                 const request = https.get(url, { agent }, (response) => {
-                    const chunks: Buffer[] = [];
+                    const chunks: Uint8Array[] = [];
                     response.on('data', (chunk) => chunks.push(chunk));
                     response.on('end', () => resolve(Buffer.concat(chunks)));
                     response.on('error', reject);

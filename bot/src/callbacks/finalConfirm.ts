@@ -205,7 +205,7 @@ export async function handleFinalConfirm(ctx: MyContext) {
         }
 
         // Limpiar el teclado y mostrar mensaje de éxito
-        await ctx.reply("✅ ¡Inmobiliaria registrada con éxito!", {
+        await ctx.reply(`✅ ¡Inmobiliaria "${ctx.session.registration.currentRegistration.name}" registrada con éxito!`, {
             reply_markup: { remove_keyboard: true }
         });
 

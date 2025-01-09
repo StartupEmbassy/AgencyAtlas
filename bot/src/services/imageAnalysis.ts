@@ -37,6 +37,15 @@ interface ImageAnalysisResult {
 
 export const analyzeWithGemini = async (imageUrl: string): Promise<ImageAnalysisResult> => {
     try {
+        // Validar API key
+        if (!process.env.GEMINI_API_KEY) {
+            throw new Error('GEMINI_API_KEY no está definida en las variables de entorno');
+        }
+
+        if (!process.env.GEMINI_API_KEY.startsWith('AI')) {
+            console.error('⚠️ ADVERTENCIA: La API key de Gemini parece no ser válida. Debe comenzar con "AI"');
+        }
+
         // Obtener la imagen
         const imageResponse = await fetch(imageUrl);
         if (!imageResponse.ok) {
@@ -56,10 +65,16 @@ export const analyzeWithGemini = async (imageUrl: string): Promise<ImageAnalysis
             try {
                 console.log(`🔄 Intento ${attempts + 1}/${maxAttempts} con Gemini...`);
                 
-                // Verificar si el error anterior fue de cuota
-                if (lastError instanceof Error && lastError.message.includes('429')) {
-                    console.log('⚠️ Detectado error de cuota, cambiando a Groq...');
-                    throw new Error('QUOTA_EXCEEDED');
+                // Verificar si el error anterior fue de cuota o autenticación
+                if (lastError instanceof Error) {
+                    if (lastError.message.includes('429')) {
+                        console.log('⚠️ Detectado error de cuota en Gemini, cambiando a Groq...');
+                        throw new Error('QUOTA_EXCEEDED');
+                    }
+                    if (lastError.message.includes('401') || lastError.message.includes('403')) {
+                        console.log('⚠️ Error de autenticación en Gemini, verifica tu API key');
+                        throw new Error('AUTHENTICATION_ERROR');
+                    }
                 }
 
                 const result = await model.generateContent([
@@ -90,6 +105,14 @@ export const analyzeWithGemini = async (imageUrl: string): Promise<ImageAnalysis
             } catch (error) {
                 lastError = error;
                 console.error(`❌ Error en intento ${attempts + 1} con Gemini:`, error);
+                
+                // Si es un error de autenticación o cuota, no reintentamos
+                if (error instanceof Error && 
+                    (error.message.includes('AUTHENTICATION_ERROR') || 
+                     error.message.includes('QUOTA_EXCEEDED'))) {
+                    throw error;
+                }
+                
                 attempts++;
                 if (attempts < maxAttempts) {
                     const delay = Math.pow(2, attempts) * 1000; // Backoff exponencial

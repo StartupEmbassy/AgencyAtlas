@@ -7,6 +7,7 @@ export type RegistrationStep =
     | 'idle'                    // Estado inicial o cuando no hay registro en proceso
     | 'collecting_photos'       // Recibiendo fotos
     | 'analyzing_photos'        // Analizando fotos con IA
+    | 'waiting_name'           // Esperando nombre
     | 'waiting_confirmation'    // Esperando confirmación inicial de datos
     | 'waiting_location'        // Esperando ubicación GPS
     | 'waiting_final_confirm'   // Esperando confirmación final con todos los datos
