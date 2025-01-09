@@ -63,3 +63,4 @@ ecosystem.config.js.bak
 *secret*
 *token*
 credentials.json
+bot/.env
